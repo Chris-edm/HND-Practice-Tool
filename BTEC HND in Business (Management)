@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unit Ledger — HND Practice &amp; Standing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<style>
+  :root{
+    --ink:#16233F;
+    --ink-soft:#3B4A6B;
+    --paper:#EEF0F1;
+    --paper-raised:#FFFFFF;
+    --line:#C9CDD4;
+    --folder:#D9C9A3;
+    --folder-dark:#B49F6E;
+    --pass:#3B6E8F;
+    --pass-bg:#E4EDF2;
+    --merit:#B5852C;
+    --merit-bg:#F5EBD8;
+    --dist:#2F5233;
+    --dist-bg:#E3EAE1;
+    --notyet:#9A4632;
+    --notyet-bg:#F3E4DE;
+    --radius:3px;
+    --serif:'Spectral', Georgia, serif;
+    --sans:'Inter', -apple-system, sans-serif;
+    --mono:'IBM Plex Mono', monospace;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:var(--sans);
+    background:var(--paper);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{max-width:960px;margin:0 auto;padding:0 20px 80px;}
+
+  /* Top bar */
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:22px 0 16px;border-bottom:2px solid var(--ink);
+    margin-bottom:24px;
+  }
+  .brand{display:flex;align-items:baseline;gap:10px;}
+  .brand h1{font-family:var(--serif);font-size:22px;font-weight:700;margin:0;letter-spacing:0.2px;}
+  .brand .sub{font-family:var(--mono);font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:1px;}
+  .mode-toggle{display:flex;border:1.5px solid var(--ink);border-radius:var(--radius);overflow:hidden;}
+  .mode-toggle button{
+    border:none;background:var(--paper-raised);color:var(--ink);
+    font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:0.8px;
+    padding:9px 16px;cursor:pointer;font-weight:600;
+  }
+  .mode-toggle button.active{background:var(--ink);color:#fff;}
+
+  /* Cards */
+  .card{
+    background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);
+    padding:22px 24px;margin-bottom:18px;
+  }
+  .card h2{font-family:var(--serif);font-size:19px;margin:0 0 4px;font-weight:600;}
+  .card .hint{font-size:13px;color:var(--ink-soft);margin:0 0 16px;}
+  label{display:block;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--ink-soft);margin-bottom:6px;margin-top:14px;}
+  label:first-of-type{margin-top:0;}
+  input[type=text], textarea, select{
+    width:100%;font-family:var(--sans);font-size:14px;padding:10px 12px;
+    border:1px solid var(--line);border-radius:var(--radius);background:#fff;color:var(--ink);
+    resize:vertical;
+  }
+  textarea{min-height:90px;line-height:1.5;}
+  input[type=text]:focus, textarea:focus, select:focus{outline:2px solid var(--ink-soft);outline-offset:1px;}
+  .row{display:flex;gap:14px;flex-wrap:wrap;}
+  .row > *{flex:1;min-width:220px;}
+
+  button.btn{
+    font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:0.6px;font-weight:600;
+    background:var(--ink);color:#fff;border:none;border-radius:var(--radius);
+    padding:11px 18px;cursor:pointer;margin-top:14px;margin-right:8px;
+  }
+  button.btn:hover{background:var(--ink-soft);}
+  button.btn.secondary{background:#fff;color:var(--ink);border:1.5px solid var(--ink);}
+  button.btn.secondary:hover{background:var(--paper);}
+  button.btn.danger{background:#fff;color:var(--notyet);border:1.5px solid var(--notyet);}
+  button.btn:disabled{opacity:0.5;cursor:not-allowed;}
+  .file-btn{display:inline-block;font-family:var(--mono);font-size:11px;text-transform:uppercase;
+    border:1px dashed var(--ink-soft);border-radius:var(--radius);padding:8px 12px;cursor:pointer;
+    color:var(--ink-soft);margin-top:8px;background:#fbfbfa;}
+  .file-btn input{display:none;}
+  .file-meta{font-size:12px;color:var(--ink-soft);margin-top:6px;font-style:italic;}
+
+  /* Unit selector row */
+  .unit-select-row{display:flex;gap:10px;align-items:center;margin-bottom:18px;}
+  .unit-select-row select{flex:1;}
+
+  /* Stamp badges */
+  .stamp{
+    display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-weight:700;
+    font-size:11px;letter-spacing:0.8px;text-transform:uppercase;
+    padding:5px 10px;border-radius:2px;transform:rotate(-1.5deg);
+    border:2px solid currentColor;
+  }
+  .stamp.pass{color:var(--pass);background:var(--pass-bg);}
+  .stamp.merit{color:var(--merit);background:var(--merit-bg);}
+  .stamp.dist{color:var(--dist);background:var(--dist-bg);}
+  .stamp.notyet{color:var(--notyet);background:var(--notyet-bg);}
+  .stamp.neutral{color:var(--ink-soft);background:var(--paper);border-color:var(--line);transform:none;}
+  @keyframes stampdown{
+    0%{transform:rotate(-1.5deg) scale(2.2);opacity:0;}
+    60%{transform:rotate(-1.5deg) scale(0.95);opacity:1;}
+    100%{transform:rotate(-1.5deg) scale(1);opacity:1;}
+  }
+  .stamp.fresh{animation:stampdown 0.35s ease-out;}
+
+  /* LO list */
+  .lo-item{
+    border:1px solid var(--line);border-left:4px solid var(--folder-dark);border-radius:var(--radius);
+    padding:14px 16px;margin-bottom:10px;background:#fff;
+  }
+  .lo-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;}
+  .lo-code{font-family:var(--mono);font-weight:700;color:var(--folder-dark);font-size:13px;}
+  .lo-title{font-family:var(--serif);font-size:16px;font-weight:600;margin:2px 0 4px;}
+  .lo-desc{font-size:13px;color:var(--ink-soft);line-height:1.5;}
+  .criteria-row{display:flex;gap:14px;margin-top:10px;font-size:12px;flex-wrap:wrap;}
+  .criteria-col{flex:1;min-width:160px;}
+  .criteria-col b{font-family:var(--mono);font-size:10.5px;letter-spacing:0.5px;text-transform:uppercase;}
+  .criteria-col ul{margin:4px 0 0;padding-left:16px;}
+  .criteria-col li{margin-bottom:3px;color:var(--ink-soft);}
+
+  /* Questions */
+  .q-block{border-top:1px solid var(--line);padding-top:16px;margin-top:16px;}
+  .q-number{font-family:var(--mono);font-size:11px;color:var(--folder-dark);font-weight:700;}
+  .q-text{font-family:var(--serif);font-size:16px;margin:6px 0 10px;line-height:1.5;}
+  .q-targets{margin-bottom:10px;}
+  .q-targets .stamp.neutral{margin-right:6px;font-size:10px;padding:3px 7px;}
+  .feedback-box{background:var(--paper);border-radius:var(--radius);padding:12px 14px;margin-top:10px;font-size:13.5px;line-height:1.55;}
+  .feedback-box .band-line{margin-bottom:8px;display:flex;gap:8px;align-items:center;}
+
+  /* Q edit list (instructor) */
+  .qedit{border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;background:#fbfbfa;}
+  .qedit .q-text{font-size:14px;}
+  .qedit textarea{min-height:50px;font-size:13px;}
+
+  .empty{text-align:center;padding:40px 20px;color:var(--ink-soft);font-size:14px;}
+  .empty .big{font-family:var(--serif);font-size:20px;color:var(--ink);margin-bottom:6px;}
+
+  .toast{
+    position:fixed;bottom:20px;right:20px;background:var(--ink);color:#fff;
+    padding:12px 18px;border-radius:var(--radius);font-size:13px;font-family:var(--sans);
+    box-shadow:0 6px 20px rgba(0,0,0,0.2);z-index:1000;max-width:320px;
+  }
+  .spinner{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,0.4);
+    border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;margin-right:8px;vertical-align:-2px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  .dashboard-summary{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px;}
+  .summary-tile{flex:1;min-width:130px;border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 14px;background:#fff;text-align:center;}
+  .summary-tile .num{font-family:var(--serif);font-size:26px;font-weight:700;}
+  .summary-tile .lbl{font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--ink-soft);letter-spacing:0.5px;}
+
+  .link-btn{background:none;border:none;color:var(--ink-soft);text-decoration:underline;cursor:pointer;font-size:12px;padding:0;font-family:var(--sans);}
+  .divider{border:none;border-top:1px solid var(--line);margin:20px 0;}
+  .small-note{font-size:12px;color:var(--ink-soft);margin-top:4px;}
+
+  .brand{display:flex;align-items:center;gap:12px;}
+  .brand-logo{height:36px;max-width:110px;object-fit:contain;}
+  .brand-names{display:flex;flex-direction:column;}
+  .brand-names .centre{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink-soft);}
+  .staff-link{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:0.6px;
+    color:var(--ink-soft);background:none;border:none;cursor:pointer;text-decoration:underline;margin-right:10px;}
+  .logo-preview{height:44px;max-width:140px;object-fit:contain;border:1px dashed var(--line);padding:4px;background:#fff;}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDxMfpFVUSU8lDizutQLiZ7Dov0Ihz9KwE",
+  authDomain: "edm-global-campus.firebaseapp.com",
+  projectId: "edm-global-campus",
+  storageBucket: "edm-global-campus.firebasestorage.app",
+  messagingSenderId: "390917281071",
+  appId: "1:390917281071:web:7dbbf7da5b0c68a935fdda"
+};
+const GEMINI_API_KEY = "AQ.Ab8RN6LzWe2fPoVI2LZXFV8WqQY6U2KyPeXSPy4Azc-7Fd0-Qg";
+
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+
+  // ---------- Constants ----------
+  const MODEL = "gemini-2.5-flash";
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  // ---------- State ----------
+  let state = {
+    mode: "instructor", // instructor | student
+    unitsIndex: [], // [{id,name}]
+    currentUnitId: null,
+    currentUnit: null, // full unit object when loaded
+    studentUnitId: null,
+    studentUnit: null,
+    studentLoId: null,
+    studentQuestions: null,
+    studentResults: {}, // loId -> results array
+    loading: null,
+    answers: {}, // qid -> text
+    gradedFeedback: null, // {loId, items:[{qid, band, feedback}], overall}
+    settings: { centreName: "", logoDataUrl: "", passcode: "" },
+    instructorUnlocked: false,
+    studentId: localStorage.getItem("unitLedgerStudentId") || "",
+  };
+
+  function uid(prefix){ return prefix + "_" + Math.random().toString(36).slice(2,10); }
+
+  function showToast(msg, ms){
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(()=>el.remove(), ms || 3200);
+  }
+
+  function ensureStudentId(){
+    if(state.studentId) return state.studentId;
+    let entered = "";
+    while(!entered){
+      entered = (prompt("Enter your name or student ID. This lets your results follow you if you come back later, even from a different device.") || "").trim();
+    }
+    state.studentId = entered;
+    localStorage.setItem("unitLedgerStudentId", entered);
+    return entered;
+  }
+
+  // ---------- Gemini API helper ----------
+  async function callAI(systemPrompt, userPrompt, expectJson){
+    const fullPrompt = (systemPrompt ? systemPrompt + "\n\n" : "") + userPrompt;
+    const resp = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-goog-api-key": GEMINI_API_KEY
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: fullPrompt }] }]
+        })
+      }
+    );
+    if(!resp.ok){
+      throw new Error("API error " + resp.status);
+    }
+    const data = await resp.json();
+    const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+    const text = parts.map(p => p.text || "").join("\n").trim();
+    if(expectJson){
+      let clean = text.replace(/```json/g,"").replace(/```/g,"").trim();
+      const firstBrace = clean.search(/[\[{]/);
+      if(firstBrace > 0) clean = clean.slice(firstBrace);
+      return JSON.parse(clean);
+    }
+    return text;
+  }
+
+  // ---------- File extraction ----------
+  async function extractPdfText(file){
+    const buf = await file.arrayBuffer();
+    const doc = await pdfjsLib.getDocument({data: buf}).promise;
+    let out = [];
+    for(let i=1;i<=doc.numPages;i++){
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      const strs = content.items.map(it => it.str);
+      out.push(strs.join(" "));
+    }
+    return out.join("\n\n");
+  }
+
+  async function extractPptxText(file){
+    const buf = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(buf);
+    const slideFiles = Object.keys(zip.files)
+      .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+      .sort((a,b)=>{
+        const na = parseInt(a.match(/slide(\d+)\.xml/)[1]);
+        const nb = parseInt(b.match(/slide(\d+)\.xml/)[1]);
+        return na - nb;
+      });
+    let out = [];
+    for(const name of slideFiles){
+      const xml = await zip.files[name].async("string");
+      const matches = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map(m=>m[1]);
+      out.push(matches.join(" "));
+    }
+    return out.join("\n\n");
+  }
+
+  async function extractDocxText(file){
+    const buf = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({arrayBuffer: buf});
+    return result.value;
+  }
+
+  async function extractFile(file){
+    const lower = file.name.toLowerCase();
+    if(lower.endsWith(".pdf")) return await extractPdfText(file);
+    if(lower.endsWith(".pptx")) return await extractPptxText(file);
+    if(lower.endsWith(".docx")) return await extractDocxText(file);
+    throw new Error("Unsupported file type — please upload .pdf, .pptx, or .docx, or paste text instead.");
+  }
+
+  // ---------- Storage helpers (Firestore) ----------
+  async function loadUnitsIndex(){
+    try{
+      const snap = await getDocs(collection(db, "units"));
+      state.unitsIndex = snap.docs.map(d => ({ id: d.id, name: (d.data().name || "Untitled unit") }));
+    }catch(e){ state.unitsIndex = []; showToast("Could not load units: " + e.message); }
+  }
+  async function loadUnit(unitId){
+    try{
+      const snap = await getDoc(doc(db, "units", unitId));
+      return snap.exists() ? snap.data() : null;
+    }catch(e){ showToast("Could not load unit: " + e.message); return null; }
+  }
+  async function saveUnit(unit){
+    await setDoc(doc(db, "units", unit.id), unit);
+  }
+  async function deleteUnitDoc(unitId){
+    await deleteDoc(doc(db, "units", unitId));
+  }
+  async function loadQuestions(unitId, loId){
+    try{
+      const snap = await getDoc(doc(db, "questions", unitId + "_" + loId));
+      return snap.exists() ? (snap.data().questions || []) : [];
+    }catch(e){ return []; }
+  }
+  async function saveQuestions(unitId, loId, questions){
+    await setDoc(doc(db, "questions", unitId + "_" + loId), { questions });
+  }
+  async function deleteQuestionsDoc(unitId, loId){
+    try{ await deleteDoc(doc(db, "questions", unitId + "_" + loId)); }catch(e){}
+  }
+  async function loadResults(unitId, loId){
+    try{
+      const sid = ensureStudentId();
+      const snap = await getDoc(doc(db, "results", sid + "_" + unitId + "_" + loId));
+      return snap.exists() ? (snap.data().attempts || []) : [];
+    }catch(e){ return []; }
+  }
+  async function saveResults(unitId, loId, results){
+    const sid = ensureStudentId();
+    await setDoc(doc(db, "results", sid + "_" + unitId + "_" + loId), { attempts: results });
+  }
+
+  // ---------- Rendering ----------
+  const app = document.getElementById("app");
+
+  function render(){
+    app.innerHTML = topbarHtml() + (state.mode === "instructor" ? instructorHtml() : studentHtml());
+    attachHandlers();
+  }
+
+  function topbarHtml(){
+    const s = state.settings;
+    const logoHtml = s.logoDataUrl ? `<img src="${s.logoDataUrl}" class="brand-logo" alt="Centre logo">` : "";
+    const centreHtml = s.centreName ? `<span class="centre">${escapeHtml(s.centreName)}</span>` : "";
+    return `
+    <div class="topbar">
+      <div class="brand">
+        ${logoHtml}
+        <div class="brand-names">
+          <h1>Unit Ledger</h1>
+          ${centreHtml || `<span class="sub">HND Practice &amp; Standing</span>`}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;">
+        ${!state.instructorUnlocked && state.mode==='student' ? `<button class="staff-link" id="staff-access-btn">Staff access</button>` : ""}
+        <div class="mode-toggle">
+          <button data-mode="student" class="${state.mode==='student'?'active':''}">Student</button>
+          ${state.instructorUnlocked ? `<button data-mode="instructor" class="${state.mode==='instructor'?'active':''}">Instructor</button>` : ""}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function bandStamp(band, fresh){
+    const map = {
+      pass:{cls:"pass", label:"Pass standard"},
+      merit:{cls:"merit", label:"Merit standard"},
+      distinction:{cls:"dist", label:"Distinction standard"},
+      notyet:{cls:"notyet", label:"Not yet meeting Pass"},
+      unattempted:{cls:"neutral", label:"Not attempted"}
+    };
+    const m = map[band] || map.unattempted;
+    return `<span class="stamp ${m.cls}${fresh?' fresh':''}">${m.label}</span>`;
+  }
+
+  // ===================== INSTRUCTOR VIEW =====================
+  function instructorHtml(){
+    let html = "";
+    html += centreSettingsHtml();
+    html += `<div class="card">
+      <h2>Units</h2>
+      <p class="hint">Create a unit record, attach the assignment brief and source content, then generate practice questions per learning outcome.</p>
+      <div class="unit-select-row">
+        <select id="unit-select">
+          <option value="">— Select a unit —</option>
+          ${state.unitsIndex.map(u=>`<option value="${u.id}" ${state.currentUnitId===u.id?'selected':''}>${escapeHtml(u.name)}</option>`).join("")}
+        </select>
+        <button class="btn secondary" id="new-unit-btn">+ New Unit</button>
+      </div>
+    </div>`;
+
+    if(state.currentUnit){
+      html += unitWorkspaceHtml(state.currentUnit);
+    }
+    return html;
+  }
+
+  function centreSettingsHtml(){
+    const s = state.settings;
+    return `<div class="card">
+      <h2>Centre settings</h2>
+      <p class="hint">This name and logo appear in the header for both instructor and student views. The staff passcode controls who can reach this instructor area — anyone without it only ever sees the student page.</p>
+      <label>Centre / school name</label>
+      <input type="text" id="centre-name-input" value="${escapeHtml(s.centreName)}" placeholder="e.g. Riverside College">
+      <label>Centre logo</label>
+      ${s.logoDataUrl ? `<div><img src="${s.logoDataUrl}" class="logo-preview" alt="Logo preview"></div>` : ""}
+      <label class="file-btn">Upload logo (image file)
+        <input type="file" id="logo-file-input" accept="image/*">
+      </label>
+      <div class="row" style="margin-top:14px;">
+        <div>
+          <label>Change staff passcode</label>
+          <input type="text" id="new-passcode-input" placeholder="Leave blank to keep current passcode">
+        </div>
+      </div>
+      <button class="btn" id="save-centre-settings-btn">Save centre settings</button>
+      <p class="small-note">Note: this passcode is a light deterrent to keep casual visitors on the student page — since this tool runs entirely in the browser with no server, it isn't unbreakable security. Don't use it to protect anything highly sensitive.</p>
+    </div>`;
+  }
+
+  function unitWorkspaceHtml(unit){
+    let html = `<div class="card">
+      <label>Unit name</label>
+      <input type="text" id="unit-name" value="${escapeHtml(unit.name)}" placeholder="e.g. Unit 3: Human Resource Management">
+      <div class="row">
+        <button class="btn secondary" id="save-unit-name-btn">Save name</button>
+        <button class="btn danger" id="delete-unit-btn">Delete unit</button>
+      </div>
+    </div>`;
+
+    // Assignment brief
+    html += `<div class="card">
+      <h2>Assignment brief</h2>
+      <p class="hint">Paste the brief text, or upload the brief file, then extract the learning outcomes and Pass / Merit / Distinction criteria.</p>
+      <label>Brief text</label>
+      <textarea id="brief-text" placeholder="Paste the assignment brief here...">${escapeHtml(unit.assignmentBrief || "")}</textarea>
+      <label class="file-btn">Upload brief (.pdf, .pptx, or .docx)
+        <input type="file" id="brief-file" accept=".pdf,.pptx,.docx">
+      </label>
+      <div class="file-meta" id="brief-file-meta"></div>
+      <div class="row">
+        <button class="btn" id="extract-los-btn">Extract learning outcomes</button>
+      </div>
+    </div>`;
+
+    // LOs
+    html += `<div class="card">
+      <h2>Learning outcomes</h2>
+      <p class="hint">Review and edit what was extracted — these anchor the practice questions generated below.</p>
+      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
+      <button class="btn secondary" id="add-lo-btn">+ Add learning outcome manually</button>
+    </div>`;
+
+    // Source content
+    html += `<div class="card">
+      <h2>Source content</h2>
+      <p class="hint">Only this content — lecture slides and tutorial material — will be used to write and grade questions. No outside theory is introduced.</p>
+      <div class="row">
+        <div>
+          <label>Lecture slide content</label>
+          <textarea id="slides-text" placeholder="Paste slide text here...">${escapeHtml(unit.slidesText || "")}</textarea>
+          <label class="file-btn">Upload slides (.pdf, .pptx, or .docx)
+            <input type="file" id="slides-file" accept=".pdf,.pptx,.docx">
+          </label>
+          <div class="file-meta" id="slides-file-meta"></div>
+        </div>
+        <div>
+          <label>Tutorial questions / material</label>
+          <textarea id="tutorial-text" placeholder="Paste tutorial material here...">${escapeHtml(unit.tutorialText || "")}</textarea>
+          <label class="file-btn">Upload tutorial doc (.pdf, .pptx, or .docx)
+            <input type="file" id="tutorial-file" accept=".pdf,.pptx,.docx">
+          </label>
+          <div class="file-meta" id="tutorial-file-meta"></div>
+        </div>
+      </div>
+      <button class="btn" id="save-content-btn">Save content</button>
+    </div>`;
+
+    // Questions per LO
+    if(unit.los && unit.los.length){
+      html += `<div class="card">
+        <h2>Practice questions</h2>
+        <p class="hint">Generate scenario-based questions for each learning outcome, scaffolded toward the assignment task and its criteria.</p>
+        ${unit.los.map(lo => loQuestionsHtml(unit, lo)).join("<hr class='divider'>")}
+      </div>`;
+    }
+
+    return html;
+  }
+
+  function loEditHtml(lo, i){
+    return `<div class="lo-item" data-lo-id="${lo.id}">
+      <div class="row">
+        <div style="flex:0 0 90px;min-width:90px;">
+          <label>Code</label>
+          <input type="text" class="lo-field" data-field="code" value="${escapeHtml(lo.code||'')}" placeholder="LO1">
+        </div>
+        <div>
+          <label>Title</label>
+          <input type="text" class="lo-field" data-field="title" value="${escapeHtml(lo.title||'')}" placeholder="Understand...">
+        </div>
+      </div>
+      <label>Description</label>
+      <textarea class="lo-field" data-field="description" style="min-height:50px;">${escapeHtml(lo.description||'')}</textarea>
+      <div class="criteria-row">
+        <div class="criteria-col">
+          <b>Pass criteria</b>
+          <textarea class="lo-field" data-field="pass" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.pass)||'')}</textarea>
+        </div>
+        <div class="criteria-col">
+          <b>Merit criteria</b>
+          <textarea class="lo-field" data-field="merit" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.merit)||'')}</textarea>
+        </div>
+        <div class="criteria-col">
+          <b>Distinction criteria</b>
+          <textarea class="lo-field" data-field="distinction" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.distinction)||'')}</textarea>
+        </div>
+      </div>
+      <button class="btn secondary lo-save-btn" data-lo-id="${lo.id}" style="margin-top:10px;">Save LO</button>
+      <button class="btn danger lo-delete-btn" data-lo-id="${lo.id}" style="margin-top:10px;">Delete</button>
+    </div>`;
+  }
+
+  function loQuestionsHtml(unit, lo){
+    const qs = state._questionsCache && state._questionsCache[lo.id];
+    return `<div class="lo-block" data-lo-block="${lo.id}">
+      <div class="lo-head">
+        <div>
+          <span class="lo-code">${escapeHtml(lo.code||'')}</span>
+          <div class="lo-title">${escapeHtml(lo.title||'(untitled)')}</div>
+        </div>
+        <button class="btn secondary gen-questions-btn" data-lo-id="${lo.id}">
+          ${qs && qs.length ? "Regenerate questions" : "Generate questions"}
+        </button>
+      </div>
+      <div class="q-list" id="qlist-${lo.id}">
+        ${qs ? renderQuestionEditList(qs) : `<p class="small-note">Not generated yet.</p>`}
+      </div>
+    </div>`;
+  }
+
+  function renderQuestionEditList(qs){
+    if(!qs || !qs.length) return `<p class="small-note">No questions generated yet.</p>`;
+    return qs.map((q,i)=>`<div class="qedit">
+      <div class="q-number">Question ${i+1} — targets ${(q.targetCriteria||[]).join(", ")}</div>
+      <div class="q-text">${escapeHtml(q.question)}</div>
+      <details><summary class="small-note" style="cursor:pointer;">Model answer points (for grading reference)</summary>
+        <ul style="font-size:12.5px;color:var(--ink-soft);">${(q.modelAnswerPoints||[]).map(p=>`<li>${escapeHtml(p)}</li>`).join("")}</ul>
+      </details>
+    </div>`).join("");
+  }
+
+  // ===================== STUDENT VIEW =====================
+  function studentHtml(){
+    let html = `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <h2 style="margin:0;">Choose your unit</h2>
+        <div class="small-note">
+          ${state.studentId ? `Signed in as <b>${escapeHtml(state.studentId)}</b> &middot; <button class="link-btn" id="change-student-id-btn">not you?</button>` : ""}
+        </div>
+      </div>
+      <div class="unit-select-row" style="margin-top:12px;">
+        <select id="student-unit-select">
+          <option value="">— Select a unit —</option>
+          ${state.unitsIndex.map(u=>`<option value="${u.id}" ${state.studentUnitId===u.id?'selected':''}>${escapeHtml(u.name)}</option>`).join("")}
+        </select>
+      </div>
+    </div>`;
+
+    if(!state.unitsIndex.length){
+      html += `<div class="empty"><div class="big">No units published yet</div>Ask your tutor to add practice material for this unit.</div>`;
+      return html;
+    }
+    if(!state.studentUnit) return html;
+
+    if(!state.studentLoId){
+      html += studentLoOverviewHtml();
+    } else {
+      html += studentQuestionsHtml();
+    }
+    return html;
+  }
+
+  function studentLoOverviewHtml(){
+    const unit = state.studentUnit;
+    if(!unit.los || !unit.los.length){
+      return `<div class="empty"><div class="big">No learning outcomes set up yet</div>Check back once your tutor has added them.</div>`;
+    }
+    let html = `<div class="card"><h2>${escapeHtml(unit.name)}</h2><p class="hint">Your current standing against each learning outcome, based on your most recent attempt.</p>`;
+    unit.los.forEach(lo=>{
+      const results = state.studentResults[lo.id] || [];
+      const latest = results[results.length-1];
+      const band = latest ? latest.overallBand : "unattempted";
+      html += `<div class="lo-item">
+        <div class="lo-head">
+          <div>
+            <span class="lo-code">${escapeHtml(lo.code||'')}</span>
+            <div class="lo-title">${escapeHtml(lo.title||'')}</div>
+            <div class="lo-desc">${escapeHtml(lo.description||'')}</div>
+          </div>
+          <div style="text-align:right;">
+            ${bandStamp(band)}
+            <div style="margin-top:8px;">
+              <button class="btn secondary open-lo-btn" data-lo-id="${lo.id}">Practice this LO</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+    return html;
+  }
+
+  function studentQuestionsHtml(){
+    const unit = state.studentUnit;
+    const lo = unit.los.find(l=>l.id===state.studentLoId);
+    const qs = state.studentQuestions || [];
+    let html = `<div class="card">
+      <button class="link-btn" id="back-to-los-btn">&larr; Back to learning outcomes</button>
+      <h2 style="margin-top:12px;">${escapeHtml(lo.code||'')} — ${escapeHtml(lo.title||'')}</h2>
+      <p class="hint">${escapeHtml(lo.description||'')}</p>`;
+
+    if(!qs.length){
+      html += `<p class="small-note">No practice questions available for this learning outcome yet.</p></div>`;
+      return html;
+    }
+
+    qs.forEach((q,i)=>{
+      const fb = state.gradedFeedback && state.gradedFeedback.loId===lo.id
+        ? state.gradedFeedback.items.find(it=>it.qid===q.id) : null;
+      html += `<div class="q-block">
+        <div class="q-number">Question ${i+1}</div>
+        <div class="q-text">${escapeHtml(q.question)}</div>
+        <div class="q-targets">${(q.targetCriteria||[]).map(c=>`<span class="stamp neutral">${escapeHtml(c)}</span>`).join("")}</div>
+        <textarea class="answer-box" data-qid="${q.id}" placeholder="Write your response here...">${escapeHtml(state.answers[q.id]||"")}</textarea>
+        ${fb ? `<div class="feedback-box">
+          <div class="band-line">${bandStamp(fb.band, true)}</div>
+          <div>${escapeHtml(fb.feedback)}</div>
+        </div>` : ""}
+      </div>`;
+    });
+
+    html += `<button class="btn" id="submit-answers-btn">Submit for grading</button>`;
+    if(state.gradedFeedback && state.gradedFeedback.loId===lo.id){
+      html += `<div class="feedback-box" style="margin-top:16px;border:1px solid var(--line);">
+        <div class="band-line"><b style="font-family:var(--mono);font-size:11px;text-transform:uppercase;">Overall for this attempt:</b> ${bandStamp(state.gradedFeedback.overallBand, true)}</div>
+        <div>${escapeHtml(state.gradedFeedback.overallNote||"")}</div>
+      </div>`;
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  function escapeHtml(s){
+    if(s===undefined || s===null) return "";
+    return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  // ---------- Event handling ----------
+  function attachHandlers(){
+    app.querySelectorAll("[data-mode]").forEach(btn=>{
+      btn.onclick = () => {
+        const target = btn.dataset.mode;
+        if(target === "instructor" && !state.instructorUnlocked){
+          return; // shouldn't happen, button only renders when unlocked
+        }
+        state.mode = target;
+        render();
+      };
+    });
+
+    const staffBtn = document.getElementById("staff-access-btn");
+    if(staffBtn) staffBtn.onclick = async () => {
+      const s = state.settings;
+      if(!s.passcode){
+        const newPass = prompt("No staff passcode is set yet. Create one now to protect the instructor area:");
+        if(!newPass) return;
+        state.settings.passcode = newPass;
+        await setDoc(doc(db, "settings", "main"), state.settings);
+        state.instructorUnlocked = true;
+        state.mode = "instructor";
+        showToast("Staff passcode created. Keep it to yourself and any colleagues you assign.");
+        render();
+        return;
+      }
+      const entered = prompt("Enter the staff passcode:");
+      if(entered === null) return;
+      if(entered === s.passcode){
+        state.instructorUnlocked = true;
+        state.mode = "instructor";
+        render();
+      } else {
+        showToast("Incorrect passcode.");
+      }
+    };
+
+    if(state.mode === "instructor"){
+      attachInstructorHandlers();
+    } else {
+      attachStudentHandlers();
+    }
+  }
+
+  function attachInstructorHandlers(){
+    let pendingLogoDataUrl = state.settings.logoDataUrl;
+    const logoInput = document.getElementById("logo-file-input");
+    if(logoInput) logoInput.onchange = () => {
+      const f = logoInput.files[0]; if(!f) return;
+      if(f.size > 700 * 1024){
+        showToast("Please use a smaller logo image (under ~700KB) so it fits Firestore's document size limit.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => { pendingLogoDataUrl = reader.result; };
+      reader.readAsDataURL(f);
+    };
+
+    const saveCentreBtn = document.getElementById("save-centre-settings-btn");
+    if(saveCentreBtn) saveCentreBtn.onclick = async () => {
+      state.settings.centreName = document.getElementById("centre-name-input").value.trim();
+      if(pendingLogoDataUrl) state.settings.logoDataUrl = pendingLogoDataUrl;
+      const newPass = document.getElementById("new-passcode-input").value.trim();
+      if(newPass) state.settings.passcode = newPass;
+      try{
+        await setDoc(doc(db, "settings", "main"), state.settings);
+        showToast("Centre settings saved.");
+        render();
+      }catch(e){
+        showToast("Could not save settings: " + e.message);
+      }
+    };
+
+    const unitSelect = document.getElementById("unit-select");
+    if(unitSelect) unitSelect.onchange = async (e) => {
+      const id = e.target.value;
+      if(!id){ state.currentUnitId=null; state.currentUnit=null; render(); return; }
+      state.currentUnitId = id;
+      state.loading = "Loading unit...";
+      render();
+      state.currentUnit = await loadUnit(id);
+      state._questionsCache = {};
+      if(state.currentUnit && state.currentUnit.los){
+        for(const lo of state.currentUnit.los){
+          state._questionsCache[lo.id] = await loadQuestions(id, lo.id);
+        }
+      }
+      state.loading = null;
+      render();
+    };
+
+    const newUnitBtn = document.getElementById("new-unit-btn");
+    if(newUnitBtn) newUnitBtn.onclick = async () => {
+      const id = uid("unit");
+      const unit = { id, name: "Untitled unit", assignmentBrief:"", slidesText:"", tutorialText:"", los:[] };
+      await saveUnit(unit);
+      state.unitsIndex.push({id, name: unit.name});
+      state.currentUnitId = id;
+      state.currentUnit = unit;
+      state._questionsCache = {};
+      render();
+    };
+
+    const unitNameInput = document.getElementById("unit-name");
+    const saveNameBtn = document.getElementById("save-unit-name-btn");
+    if(saveNameBtn) saveNameBtn.onclick = async () => {
+      state.currentUnit.name = unitNameInput.value.trim() || "Untitled unit";
+      await saveUnit(state.currentUnit);
+      const idx = state.unitsIndex.find(u=>u.id===state.currentUnit.id);
+      if(idx) idx.name = state.currentUnit.name;
+      showToast("Unit name saved.");
+      render();
+    };
+
+    const deleteUnitBtn = document.getElementById("delete-unit-btn");
+    if(deleteUnitBtn) deleteUnitBtn.onclick = async () => {
+      if(!confirm("Delete this unit? This cannot be undone.")) return;
+      state.unitsIndex = state.unitsIndex.filter(u=>u.id!==state.currentUnit.id);
+      try{ await deleteUnitDoc(state.currentUnit.id); }catch(e){}
+      state.currentUnitId = null; state.currentUnit = null;
+      showToast("Unit deleted.");
+      render();
+    };
+
+    const briefFile = document.getElementById("brief-file");
+    if(briefFile) briefFile.onchange = async () => {
+      const f = briefFile.files[0]; if(!f) return;
+      document.getElementById("brief-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("brief-text").value = text;
+        document.getElementById("brief-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+      }catch(err){
+        document.getElementById("brief-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const extractBtn = document.getElementById("extract-los-btn");
+    if(extractBtn) extractBtn.onclick = async () => {
+      const briefText = document.getElementById("brief-text").value.trim();
+      if(!briefText){ showToast("Paste or upload the assignment brief first."); return; }
+      extractBtn.disabled = true;
+      extractBtn.innerHTML = '<span class="spinner"></span>Extracting...';
+      try{
+        const sys = "You are assisting a BTEC HND Level 5 tutor. You extract structured Learning Outcomes and Pass/Merit/Distinction assessment criteria from an assignment brief. Respond ONLY with valid JSON, no preamble, no markdown fences. JSON shape: {\"los\": [{\"code\": \"LO1\", \"title\": \"short title\", \"description\": \"1-2 sentence description\", \"criteria\": {\"pass\": \"P1: ...; P2: ...\", \"merit\": \"M1: ...\", \"distinction\": \"D1: ...\"}}]}. Use the exact criterion codes and wording found in the brief where possible; if criteria are not explicit for an LO, write a brief best-effort criterion in the same style.";
+        const userMsg = "Assignment brief:\n\n" + briefText;
+        const result = await callAI(sys, userMsg, true);
+        const los = (result.los || []).map(lo => ({
+          id: uid("lo"),
+          code: lo.code || "",
+          title: lo.title || "",
+          description: lo.description || "",
+          criteria: {
+            pass: (lo.criteria && lo.criteria.pass) || "",
+            merit: (lo.criteria && lo.criteria.merit) || "",
+            distinction: (lo.criteria && lo.criteria.distinction) || ""
+          }
+        }));
+        state.currentUnit.assignmentBrief = briefText;
+        state.currentUnit.los = los;
+        await saveUnit(state.currentUnit);
+        state._questionsCache = {};
+        for(const lo of los){ state._questionsCache[lo.id] = []; }
+        showToast("Learning outcomes extracted — review and edit below.");
+        render();
+      }catch(err){
+        showToast("Extraction failed: " + err.message);
+        extractBtn.disabled = false;
+        extractBtn.textContent = "Extract learning outcomes";
+      }
+    };
+
+    const addLoBtn = document.getElementById("add-lo-btn");
+    if(addLoBtn) addLoBtn.onclick = async () => {
+      const lo = {id: uid("lo"), code:"LO"+((state.currentUnit.los.length)+1), title:"", description:"", criteria:{pass:"",merit:"",distinction:""}};
+      state.currentUnit.los.push(lo);
+      state._questionsCache[lo.id] = [];
+      await saveUnit(state.currentUnit);
+      render();
+    };
+
+    app.querySelectorAll(".lo-save-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const loId = btn.dataset.loId;
+        const item = app.querySelector(`.lo-item[data-lo-id="${loId}"]`);
+        const lo = state.currentUnit.los.find(l=>l.id===loId);
+        item.querySelectorAll(".lo-field").forEach(f=>{
+          const field = f.dataset.field;
+          if(field==="pass"||field==="merit"||field==="distinction"){
+            lo.criteria[field] = f.value;
+          } else {
+            lo[field] = f.value;
+          }
+        });
+        await saveUnit(state.currentUnit);
+        showToast("Learning outcome saved.");
+        render();
+      };
+    });
+
+    app.querySelectorAll(".lo-delete-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        if(!confirm("Delete this learning outcome and its questions?")) return;
+        const loId = btn.dataset.loId;
+        state.currentUnit.los = state.currentUnit.los.filter(l=>l.id!==loId);
+        await saveUnit(state.currentUnit);
+        try{ await deleteQuestionsDoc(state.currentUnit.id, loId); }catch(e){}
+        delete state._questionsCache[loId];
+        render();
+      };
+    });
+
+    const slidesFile = document.getElementById("slides-file");
+    if(slidesFile) slidesFile.onchange = async () => {
+      const f = slidesFile.files[0]; if(!f) return;
+      document.getElementById("slides-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("slides-text").value = text;
+        document.getElementById("slides-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+      }catch(err){
+        document.getElementById("slides-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+    const tutorialFile = document.getElementById("tutorial-file");
+    if(tutorialFile) tutorialFile.onchange = async () => {
+      const f = tutorialFile.files[0]; if(!f) return;
+      document.getElementById("tutorial-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("tutorial-text").value = text;
+        document.getElementById("tutorial-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+      }catch(err){
+        document.getElementById("tutorial-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const saveContentBtn = document.getElementById("save-content-btn");
+    if(saveContentBtn) saveContentBtn.onclick = async () => {
+      state.currentUnit.slidesText = document.getElementById("slides-text").value;
+      state.currentUnit.tutorialText = document.getElementById("tutorial-text").value;
+      await saveUnit(state.currentUnit);
+      showToast("Source content saved.");
+    };
+
+    app.querySelectorAll(".gen-questions-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const loId = btn.dataset.loId;
+        const lo = state.currentUnit.los.find(l=>l.id===loId);
+        const unit = state.currentUnit;
+        if(!unit.slidesText && !unit.tutorialText){
+          showToast("Add lecture slide or tutorial content first.");
+          return;
+        }
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Generating...';
+        try{
+          const sys = "You write practice questions for BTEC HND Level 5 students, strictly scaffolded to help them tackle a specific assignment task and meet specific assessment criteria. Rules: (1) Base every question ONLY on the provided lecture/tutorial content — never introduce theorists, models or frameworks not present in that content. (2) Questions must be scenario/case-based, written at analysis and evaluation level (not simple recall or definitions). (3) Each question should target one or more named criteria for this learning outcome, and should visibly help the student practise the kind of thinking the assignment brief will demand. (4) For each question provide brief model-answer bullet points (grading reference only, not shown to students up front) that a marker would expect to see, referencing only the given source content. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"targetCriteria\": [\"P1\",\"M1\"], \"modelAnswerPoints\": [\"...\", \"...\"]}]}. Generate 4 questions.";
+          const userMsg = "Learning outcome: " + lo.code + " — " + lo.title + "\nDescription: " + lo.description +
+            "\nPass criteria: " + lo.criteria.pass + "\nMerit criteria: " + lo.criteria.merit + "\nDistinction criteria: " + lo.criteria.distinction +
+            "\n\nAssignment brief (for scenario context):\n" + (unit.assignmentBrief||"(none provided)") +
+            "\n\nLecture slide content:\n" + (unit.slidesText||"(none provided)") +
+            "\n\nTutorial material:\n" + (unit.tutorialText||"(none provided)");
+          const result = await callAI(sys, userMsg, true);
+          const questions = (result.questions||[]).map(q=>({
+            id: uid("q"),
+            question: q.question,
+            targetCriteria: q.targetCriteria||[],
+            modelAnswerPoints: q.modelAnswerPoints||[]
+          }));
+          await saveQuestions(unit.id, loId, questions);
+          state._questionsCache[loId] = questions;
+          showToast("Questions generated for " + lo.code + ".");
+          render();
+        }catch(err){
+          showToast("Generation failed: " + err.message);
+          btn.disabled = false;
+          btn.textContent = "Generate questions";
+        }
+      };
+    });
+  }
+
+  async function refreshStudentUnitsIfNeeded(){
+    // units index already loaded globally
+  }
+
+  function attachStudentHandlers(){
+    const changeIdBtn = document.getElementById("change-student-id-btn");
+    if(changeIdBtn) changeIdBtn.onclick = () => {
+      const entered = (prompt("Enter your name or student ID:") || "").trim();
+      if(entered){
+        state.studentId = entered;
+        localStorage.setItem("unitLedgerStudentId", entered);
+        state.studentResults = {};
+        render();
+      }
+    };
+
+    const sel = document.getElementById("student-unit-select");
+    if(sel) sel.onchange = async (e) => {
+      const id = e.target.value;
+      state.studentLoId = null;
+      state.gradedFeedback = null;
+      if(!id){ state.studentUnitId=null; state.studentUnit=null; render(); return; }
+      state.studentUnitId = id;
+      state.loading = "Loading...";
+      render();
+      state.studentUnit = await loadUnit(id);
+      state.studentResults = {};
+      if(state.studentUnit && state.studentUnit.los){
+        for(const lo of state.studentUnit.los){
+          state.studentResults[lo.id] = await loadResults(id, lo.id);
+        }
+      }
+      state.loading = null;
+      render();
+    };
+
+    app.querySelectorAll(".open-lo-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const loId = btn.dataset.loId;
+        state.studentLoId = loId;
+        state.gradedFeedback = null;
+        state.answers = {};
+        state.loading = "Loading questions...";
+        render();
+        state.studentQuestions = await loadQuestions(state.studentUnit.id, loId);
+        state.loading = null;
+        render();
+      };
+    });
+
+    const backBtn = document.getElementById("back-to-los-btn");
+    if(backBtn) backBtn.onclick = () => {
+      state.studentLoId = null;
+      state.gradedFeedback = null;
+      render();
+    };
+
+    app.querySelectorAll(".answer-box").forEach(box=>{
+      box.oninput = () => { state.answers[box.dataset.qid] = box.value; };
+    });
+
+    const submitBtn = document.getElementById("submit-answers-btn");
+    if(submitBtn) submitBtn.onclick = async () => {
+      const lo = state.studentUnit.los.find(l=>l.id===state.studentLoId);
+      const unit = state.studentUnit;
+      const qs = state.studentQuestions;
+      const unanswered = qs.filter(q => !(state.answers[q.id]||"").trim());
+      if(unanswered.length){
+        showToast("Please answer all questions before submitting.");
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<span class="spinner"></span>Grading...';
+      try{
+        const sys = "You are grading a BTEC HND Level 5 student's practice answers, strictly against the provided lecture/tutorial source content and the Pass/Merit/Distinction criteria for this learning outcome. Do not reward or expect content beyond what is in the provided source material. For each answer, decide a band: one of \"notyet\" (not yet meeting Pass), \"pass\", \"merit\", or \"distinction\", reflecting the depth of analysis/evaluation shown against the criteria. Give concise, constructive feedback (2-4 sentences) naming a strength and one concrete improvement tied to the criteria. Then give one overall band for the set and a short overall note. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"items\": [{\"qid\": \"...\", \"band\": \"pass\", \"feedback\": \"...\"}], \"overallBand\": \"merit\", \"overallNote\": \"...\"}.";
+        const userMsg = "Learning outcome: " + lo.code + " — " + lo.title +
+          "\nPass criteria: " + lo.criteria.pass + "\nMerit criteria: " + lo.criteria.merit + "\nDistinction criteria: " + lo.criteria.distinction +
+          "\n\nSource content (slides):\n" + (unit.slidesText||"") +
+          "\n\nSource content (tutorial):\n" + (unit.tutorialText||"") +
+          "\n\nQuestions and the student's answers:\n" +
+          qs.map((q,i)=>"Q"+(i+1)+" [qid:"+q.id+"] "+q.question+"\nModel answer points: "+(q.modelAnswerPoints||[]).join("; ")+"\nStudent answer: "+state.answers[q.id]).join("\n\n");
+        const result = await callAI(sys, userMsg, true);
+        state.gradedFeedback = {
+          loId: lo.id,
+          items: result.items || [],
+          overallBand: result.overallBand || "notyet",
+          overallNote: result.overallNote || ""
+        };
+        const results = state.studentResults[lo.id] || [];
+        results.push({date: new Date().toISOString(), overallBand: state.gradedFeedback.overallBand, overallNote: state.gradedFeedback.overallNote});
+        state.studentResults[lo.id] = results;
+        await saveResults(unit.id, lo.id, results);
+        render();
+      }catch(err){
+        showToast("Grading failed: " + err.message);
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit for grading";
+      }
+    };
+  }
+
+  // ---------- Init ----------
+  async function init(){
+    app.innerHTML = `<div class="empty"><div class="big">Loading ledger...</div></div>`;
+    try{
+      const snap = await getDoc(doc(db, "settings", "main"));
+      if(snap.exists()) state.settings = snap.data();
+    }catch(e){ /* no settings saved yet */ }
+    await loadUnitsIndex();
+    render();
+  }
+  init();
+</script>
+</body>
+</html>
