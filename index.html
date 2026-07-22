@@ -241,6 +241,15 @@ const db = getFirestore(fbApp);
     return entered;
   }
 
+  // Keeps requests within Groq's free-tier per-minute token budget.
+  // Roughly 4 characters per token; caps are conservative to leave room
+  // for the system prompt and the model's response.
+  function capText(text, maxChars){
+    if(!text) return "(none provided)";
+    if(text.length <= maxChars) return text;
+    return text.slice(0, maxChars) + "\n\n[...content truncated to fit the AI request size limit; consider splitting very long material across a Slides and a Tutorial field, or trimming to the most relevant sections...]";
+  }
+
   // ---------- Groq API helper ----------
   async function callAI(systemPrompt, userPrompt, expectJson, model){
     const resp = await fetch(
@@ -253,6 +262,7 @@ const db = getFirestore(fbApp);
         },
         body: JSON.stringify({
           model: model || GRADING_MODEL,
+          max_completion_tokens: 2000,
           messages: [
             ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
             { role: "user", content: userPrompt }
@@ -839,7 +849,7 @@ const db = getFirestore(fbApp);
       extractBtn.innerHTML = '<span class="spinner"></span>Extracting...';
       try{
         const sys = "You are assisting a BTEC HND Level 5 tutor. You extract structured Learning Outcomes and Pass/Merit/Distinction assessment criteria from an assignment brief. Respond ONLY with valid JSON, no preamble, no markdown fences. JSON shape: {\"los\": [{\"code\": \"LO1\", \"title\": \"short title\", \"description\": \"1-2 sentence description\", \"criteria\": {\"pass\": \"P1: ...; P2: ...\", \"merit\": \"M1: ...\", \"distinction\": \"D1: ...\"}}]}. Use the exact criterion codes and wording found in the brief where possible; if criteria are not explicit for an LO, write a brief best-effort criterion in the same style.";
-        const userMsg = "Assignment brief:\n\n" + briefText;
+        const userMsg = "Assignment brief:\n\n" + capText(briefText, 16000);
         const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
         const los = (result.los || []).map(lo => ({
           id: uid("lo"),
@@ -954,9 +964,9 @@ const db = getFirestore(fbApp);
           const sys = "You write practice questions for BTEC HND Level 5 students, strictly scaffolded to help them tackle a specific assignment task and meet specific assessment criteria. Rules: (1) Base every question ONLY on the provided lecture/tutorial content — never introduce theorists, models or frameworks not present in that content. (2) Questions must be scenario/case-based, written at analysis and evaluation level (not simple recall or definitions). (3) Each question should target one or more named criteria for this learning outcome, and should visibly help the student practise the kind of thinking the assignment brief will demand. (4) For each question provide brief model-answer bullet points (grading reference only, not shown to students up front) that a marker would expect to see, referencing only the given source content. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"targetCriteria\": [\"P1\",\"M1\"], \"modelAnswerPoints\": [\"...\", \"...\"]}]}. Generate 4 questions.";
           const userMsg = "Learning outcome: " + lo.code + " — " + lo.title + "\nDescription: " + lo.description +
             "\nPass criteria: " + lo.criteria.pass + "\nMerit criteria: " + lo.criteria.merit + "\nDistinction criteria: " + lo.criteria.distinction +
-            "\n\nAssignment brief (for scenario context):\n" + (unit.assignmentBrief||"(none provided)") +
-            "\n\nLecture slide content:\n" + (unit.slidesText||"(none provided)") +
-            "\n\nTutorial material:\n" + (unit.tutorialText||"(none provided)");
+            "\n\nAssignment brief (for scenario context):\n" + capText(unit.assignmentBrief, 6000) +
+            "\n\nLecture slide content:\n" + capText(unit.slidesText, 9000) +
+            "\n\nTutorial material:\n" + capText(unit.tutorialText, 6000);
           const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
           const questions = (result.questions||[]).map(q=>({
             id: uid("q"),
@@ -1054,8 +1064,8 @@ const db = getFirestore(fbApp);
         const sys = "You are grading a BTEC HND Level 5 student's practice answers, strictly against the provided lecture/tutorial source content and the Pass/Merit/Distinction criteria for this learning outcome. Do not reward or expect content beyond what is in the provided source material. For each answer, decide a band: one of \"notyet\" (not yet meeting Pass), \"pass\", \"merit\", or \"distinction\", reflecting the depth of analysis/evaluation shown against the criteria. Give concise, constructive feedback (2-4 sentences) naming a strength and one concrete improvement tied to the criteria. Then give one overall band for the set and a short overall note. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"items\": [{\"qid\": \"...\", \"band\": \"pass\", \"feedback\": \"...\"}], \"overallBand\": \"merit\", \"overallNote\": \"...\"}.";
         const userMsg = "Learning outcome: " + lo.code + " — " + lo.title +
           "\nPass criteria: " + lo.criteria.pass + "\nMerit criteria: " + lo.criteria.merit + "\nDistinction criteria: " + lo.criteria.distinction +
-          "\n\nSource content (slides):\n" + (unit.slidesText||"") +
-          "\n\nSource content (tutorial):\n" + (unit.tutorialText||"") +
+          "\n\nSource content (slides):\n" + capText(unit.slidesText, 4000) +
+          "\n\nSource content (tutorial):\n" + capText(unit.tutorialText, 4000) +
           "\n\nQuestions and the student's answers:\n" +
           qs.map((q,i)=>"Q"+(i+1)+" [qid:"+q.id+"] "+q.question+"\nModel answer points: "+(q.modelAnswerPoints||[]).join("; ")+"\nStudent answer: "+state.answers[q.id]).join("\n\n");
         const result = await callAI(sys, userMsg, true, GRADING_MODEL);
