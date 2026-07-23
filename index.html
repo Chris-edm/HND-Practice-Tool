@@ -181,7 +181,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDxMfpFVUSU8lDizutQLiZ7Dov0Ihz9KwE",
@@ -207,17 +207,20 @@ const db = getFirestore(fbApp);
     unitsIndex: [], // [{id,name}]
     currentUnitId: null,
     currentUnit: null, // full unit object when loaded
+    _questionsCache: {}, // sessionId -> questions[]
     studentUnitId: null,
     studentUnit: null,
-    studentLoId: null,
+    studentResults: null, // { answers: { qid: {...} } } for the current student+unit
+    studentSessionId: null,
     studentQuestions: null,
-    studentResults: {}, // loId -> results array
     loading: null,
     answers: {}, // qid -> text
-    gradedFeedback: null, // {loId, items:[{qid, band, feedback}], overall}
+    questionGrades: {}, // qid -> {band, feedback}
     settings: { centreName: "", logoDataUrl: "", passcode: "" },
     instructorUnlocked: false,
     studentId: localStorage.getItem("unitLedgerStudentId") || "",
+    progressView: null, // { students: [{studentId, answers}] } for instructor's Student Progress panel
+    progressExpanded: {}, // studentId -> bool
   };
 
   function uid(prefix){ return prefix + "_" + Math.random().toString(36).slice(2,10); }
@@ -353,28 +356,38 @@ const db = getFirestore(fbApp);
   async function deleteUnitDoc(unitId){
     await deleteDoc(doc(db, "units", unitId));
   }
-  async function loadQuestions(unitId, loId){
+  async function loadQuestions(unitId, sessionId){
     try{
-      const snap = await getDoc(doc(db, "questions", unitId + "_" + loId));
+      const snap = await getDoc(doc(db, "questions", unitId + "_" + sessionId));
       return snap.exists() ? (snap.data().questions || []) : [];
     }catch(e){ return []; }
   }
-  async function saveQuestions(unitId, loId, questions){
-    await setDoc(doc(db, "questions", unitId + "_" + loId), { questions });
+  async function saveQuestions(unitId, sessionId, questions){
+    await setDoc(doc(db, "questions", unitId + "_" + sessionId), { questions });
   }
-  async function deleteQuestionsDoc(unitId, loId){
-    try{ await deleteDoc(doc(db, "questions", unitId + "_" + loId)); }catch(e){}
+  async function deleteQuestionsDoc(unitId, sessionId){
+    try{ await deleteDoc(doc(db, "questions", unitId + "_" + sessionId)); }catch(e){}
   }
-  async function loadResults(unitId, loId){
+  // Results are stored one document per student per unit, holding every
+  // question they've answered in that unit (by qid) — this lets students
+  // see their own history and lets instructors query everyone's at once.
+  async function loadResultsForStudent(unitId){
     try{
       const sid = ensureStudentId();
-      const snap = await getDoc(doc(db, "results", sid + "_" + unitId + "_" + loId));
-      return snap.exists() ? (snap.data().attempts || []) : [];
-    }catch(e){ return []; }
+      const snap = await getDoc(doc(db, "results", sid + "_" + unitId));
+      return snap.exists() ? snap.data() : { studentId: sid, unitId, answers: {} };
+    }catch(e){ return { studentId: ensureStudentId(), unitId, answers: {} }; }
   }
-  async function saveResults(unitId, loId, results){
+  async function saveResultsForStudent(unitId, resultsDoc){
     const sid = ensureStudentId();
-    await setDoc(doc(db, "results", sid + "_" + unitId + "_" + loId), { attempts: results });
+    await setDoc(doc(db, "results", sid + "_" + unitId), resultsDoc);
+  }
+  async function loadAllResultsForUnit(unitId){
+    try{
+      const q = query(collection(db, "results"), where("unitId", "==", unitId));
+      const snap = await getDocs(q);
+      return snap.docs.map(d => d.data());
+    }catch(e){ showToast("Could not load student progress: " + e.message); return []; }
   }
 
   // ---------- Rendering ----------
@@ -418,6 +431,15 @@ const db = getFirestore(fbApp);
     };
     const m = map[band] || map.unattempted;
     return `<span class="stamp ${m.cls}${fresh?' fresh':''}">${m.label}</span>`;
+  }
+
+  const BAND_RANK = { notyet: 0, pass: 1, merit: 2, distinction: 3 };
+  // Overall standing for a set of questions is the weakest band achieved —
+  // consistent with BTEC criterion-referencing, where every relevant
+  // criterion needs to be met for a band to count.
+  function overallBandFrom(bands){
+    if(!bands.length) return "unattempted";
+    return bands.reduce((worst, b) => (BAND_RANK[b] ?? 0) < (BAND_RANK[worst] ?? 99) ? b : worst, bands[0]);
   }
 
   // ===================== INSTRUCTOR VIEW =====================
@@ -493,44 +515,63 @@ const db = getFirestore(fbApp);
     // LOs
     html += `<div class="card">
       <h2>Learning outcomes</h2>
-      <p class="hint">Review and edit what was extracted — these anchor the practice questions generated below.</p>
+      <p class="hint">Review and edit what was extracted — each daily session's questions below will be auto-tagged against these.</p>
       <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
       <button class="btn secondary" id="add-lo-btn">+ Add learning outcome manually</button>
     </div>`;
 
-    // Source content
+    // Sessions (dated lecture/tutorial content -> daily questions)
     html += `<div class="card">
-      <h2>Source content</h2>
-      <p class="hint">Only this content — lecture slides and tutorial material — will be used to write and grade questions. No outside theory is introduced.</p>
-      <div class="row">
-        <div>
-          <label>Lecture slide content</label>
-          <textarea id="slides-text" placeholder="Paste slide text here...">${escapeHtml(unit.slidesText || "")}</textarea>
-          <label class="file-btn">Upload slides (.pdf, .pptx, or .docx)
-            <input type="file" id="slides-file" accept=".pdf,.pptx,.docx">
-          </label>
-          <div class="file-meta" id="slides-file-meta"></div>
+      <h2>Sessions</h2>
+      <p class="hint">Add what was covered on a given day. Generate 1-2 practice questions from just that day's content — each gets auto-tagged with the learning outcome it best fits.</p>
+      <div id="new-session-form">
+        <div class="row">
+          <div>
+            <label>Date</label>
+            <input type="text" id="new-session-date" placeholder="YYYY-MM-DD" value="${new Date().toISOString().slice(0,10)}">
+          </div>
+          <div>
+            <label>Session title (optional)</label>
+            <input type="text" id="new-session-title" placeholder="e.g. Lecture 5: Reward management">
+          </div>
         </div>
-        <div>
-          <label>Tutorial questions / material</label>
-          <textarea id="tutorial-text" placeholder="Paste tutorial material here...">${escapeHtml(unit.tutorialText || "")}</textarea>
-          <label class="file-btn">Upload tutorial doc (.pdf, .pptx, or .docx)
-            <input type="file" id="tutorial-file" accept=".pdf,.pptx,.docx">
-          </label>
-          <div class="file-meta" id="tutorial-file-meta"></div>
+        <div class="row">
+          <div>
+            <label>Lecture slide content</label>
+            <textarea id="new-session-slides" placeholder="Paste this session's slide text here..."></textarea>
+            <label class="file-btn">Upload slides (.pdf, .pptx, or .docx)
+              <input type="file" id="new-session-slides-file" accept=".pdf,.pptx,.docx">
+            </label>
+            <div class="file-meta" id="new-session-slides-meta"></div>
+          </div>
+          <div>
+            <label>Tutorial material</label>
+            <textarea id="new-session-tutorial" placeholder="Paste this session's tutorial material here..."></textarea>
+            <label class="file-btn">Upload tutorial doc (.pdf, .pptx, or .docx)
+              <input type="file" id="new-session-tutorial-file" accept=".pdf,.pptx,.docx">
+            </label>
+            <div class="file-meta" id="new-session-tutorial-meta"></div>
+          </div>
         </div>
+        <button class="btn" id="add-session-btn">+ Add session</button>
       </div>
-      <button class="btn" id="save-content-btn">Save content</button>
+      <hr class="divider">
+      <div id="sessions-list">
+        ${(unit.sessions && unit.sessions.length)
+          ? [...unit.sessions].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(s => sessionItemHtml(unit, s)).join("")
+          : `<p class="small-note">No sessions added yet.</p>`}
+      </div>
     </div>`;
 
-    // Questions per LO
-    if(unit.los && unit.los.length){
-      html += `<div class="card">
-        <h2>Practice questions</h2>
-        <p class="hint">Generate scenario-based questions for each learning outcome, scaffolded toward the assignment task and its criteria.</p>
-        ${unit.los.map(lo => loQuestionsHtml(unit, lo)).join("<hr class='divider'>")}
-      </div>`;
-    }
+    // Student progress
+    html += `<div class="card">
+      <h2>Student progress</h2>
+      <p class="hint">Every student who has attempted this unit, their standing per learning outcome, and their full answer history.</p>
+      <button class="btn secondary" id="load-progress-btn">${state.progressView ? "Refresh" : "Load student progress"}</button>
+      <div id="progress-list" style="margin-top:14px;">
+        ${state.progressView ? studentProgressListHtml(unit) : ""}
+      </div>
+    </div>`;
 
     return html;
   }
@@ -568,33 +609,76 @@ const db = getFirestore(fbApp);
     </div>`;
   }
 
-  function loQuestionsHtml(unit, lo){
-    const qs = state._questionsCache && state._questionsCache[lo.id];
-    return `<div class="lo-block" data-lo-block="${lo.id}">
+  function sessionItemHtml(unit, session){
+    const qs = state._questionsCache[session.id];
+    return `<div class="lo-item" data-session-id="${session.id}">
       <div class="lo-head">
         <div>
-          <span class="lo-code">${escapeHtml(lo.code||'')}</span>
-          <div class="lo-title">${escapeHtml(lo.title||'(untitled)')}</div>
+          <span class="lo-code">${escapeHtml(session.date||'')}</span>
+          <div class="lo-title">${escapeHtml(session.title || '(untitled session)')}</div>
         </div>
-        <button class="btn secondary gen-questions-btn" data-lo-id="${lo.id}">
-          ${qs && qs.length ? "Regenerate questions" : "Generate questions"}
-        </button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn secondary gen-session-questions-btn" data-session-id="${session.id}">
+            ${qs && qs.length ? "Regenerate questions" : "Generate questions"}
+          </button>
+          <button class="btn danger delete-session-btn" data-session-id="${session.id}">Delete</button>
+        </div>
       </div>
-      <div class="q-list" id="qlist-${lo.id}">
-        ${qs ? renderQuestionEditList(qs) : `<p class="small-note">Not generated yet.</p>`}
+      <div class="q-list">
+        ${qs ? renderQuestionEditList(qs, unit) : `<p class="small-note">Not generated yet.</p>`}
       </div>
     </div>`;
   }
 
-  function renderQuestionEditList(qs){
+  function renderQuestionEditList(qs, unit){
     if(!qs || !qs.length) return `<p class="small-note">No questions generated yet.</p>`;
     return qs.map((q,i)=>`<div class="qedit">
-      <div class="q-number">Question ${i+1} — targets ${(q.targetCriteria||[]).join(", ")}</div>
+      <div class="q-number">Question ${i+1} — ${escapeHtml(q.loCode||'')}${q.criteriaLabel ? " (" + escapeHtml(q.criteriaLabel) + ")" : ""}</div>
       <div class="q-text">${escapeHtml(q.question)}</div>
       <details><summary class="small-note" style="cursor:pointer;">Model answer points (for grading reference)</summary>
         <ul style="font-size:12.5px;color:var(--ink-soft);">${(q.modelAnswerPoints||[]).map(p=>`<li>${escapeHtml(p)}</li>`).join("")}</ul>
       </details>
     </div>`).join("");
+  }
+
+  function studentProgressListHtml(unit){
+    const students = state.progressView.students;
+    if(!students.length) return `<p class="small-note">No student attempts recorded yet for this unit.</p>`;
+    return students.map(s=>{
+      const answers = Object.values(s.answers || {});
+      const byLo = {};
+      answers.forEach(a=>{
+        if(!byLo[a.loId]) byLo[a.loId] = [];
+        byLo[a.loId].push(a.band);
+      });
+      const loBadges = (unit.los||[]).map(lo=>{
+        const bands = byLo[lo.id];
+        const band = bands && bands.length ? overallBandFrom(bands) : "unattempted";
+        return `<span style="margin-right:8px;">${escapeHtml(lo.code)} ${bandStamp(band)}</span>`;
+      }).join("");
+      const expanded = !!state.progressExpanded[s.studentId];
+      const sortedAnswers = answers.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+      return `<div class="lo-item">
+        <div class="lo-head">
+          <div>
+            <div class="lo-title">${escapeHtml(s.studentId)}</div>
+            <div style="margin-top:6px;">${loBadges}</div>
+          </div>
+          <button class="btn secondary toggle-progress-btn" data-student-id="${escapeHtml(s.studentId)}">${expanded ? "Hide answers" : "View answers"}</button>
+        </div>
+        ${expanded ? `<div style="margin-top:12px;">
+          ${sortedAnswers.map(a=>`<div class="q-block" style="margin-top:10px;padding-top:10px;">
+            <div class="q-number">${escapeHtml(a.sessionDate||'')} &middot; ${escapeHtml(a.loCode||'')}</div>
+            <div class="q-text" style="font-size:14px;">${escapeHtml(a.question||'')}</div>
+            <div class="small-note"><b>Answer:</b> ${escapeHtml(a.answer||'')}</div>
+            <div class="feedback-box">
+              <div class="band-line">${bandStamp(a.band)}</div>
+              <div>${escapeHtml(a.feedback||'')}</div>
+            </div>
+          </div>`).join("")}
+        </div>` : ""}
+      </div>`;
+    }).join("");
   }
 
   // ===================== STUDENT VIEW =====================
@@ -620,66 +704,81 @@ const db = getFirestore(fbApp);
     }
     if(!state.studentUnit) return html;
 
-    if(!state.studentLoId){
-      html += studentLoOverviewHtml();
+    if(!state.studentSessionId){
+      html += studentUnitLandingHtml();
     } else {
-      html += studentQuestionsHtml();
+      html += studentSessionQuestionsHtml();
     }
     return html;
   }
 
-  function studentLoOverviewHtml(){
+  function studentUnitLandingHtml(){
     const unit = state.studentUnit;
-    if(!unit.los || !unit.los.length){
-      return `<div class="empty"><div class="big">No learning outcomes set up yet</div>Check back once your tutor has added them.</div>`;
-    }
-    let html = `<div class="card"><h2>${escapeHtml(unit.name)}</h2><p class="hint">Your current standing against each learning outcome, based on your most recent attempt.</p>`;
-    unit.los.forEach(lo=>{
-      const results = state.studentResults[lo.id] || [];
-      const latest = results[results.length-1];
-      const band = latest ? latest.overallBand : "unattempted";
-      html += `<div class="lo-item">
-        <div class="lo-head">
-          <div>
-            <span class="lo-code">${escapeHtml(lo.code||'')}</span>
-            <div class="lo-title">${escapeHtml(lo.title||'')}</div>
-            <div class="lo-desc">${escapeHtml(lo.description||'')}</div>
-          </div>
-          <div style="text-align:right;">
-            ${bandStamp(band)}
-            <div style="margin-top:8px;">
-              <button class="btn secondary open-lo-btn" data-lo-id="${lo.id}">Practice this LO</button>
+    const answers = Object.values((state.studentResults && state.studentResults.answers) || {});
+    let html = `<div class="card"><h2>${escapeHtml(unit.name)}</h2>`;
+
+    if(unit.los && unit.los.length){
+      html += `<p class="hint">Your current standing against each learning outcome, based on everything you've checked so far.</p>`;
+      unit.los.forEach(lo=>{
+        const bands = answers.filter(a=>a.loId===lo.id).map(a=>a.band);
+        const band = bands.length ? overallBandFrom(bands) : "unattempted";
+        html += `<div class="lo-item">
+          <div class="lo-head">
+            <div>
+              <span class="lo-code">${escapeHtml(lo.code||'')}</span>
+              <div class="lo-title">${escapeHtml(lo.title||'')}</div>
             </div>
+            ${bandStamp(band)}
           </div>
-        </div>
-      </div>`;
-    });
+        </div>`;
+      });
+    }
+    html += `</div>`;
+
+    html += `<div class="card"><h2>Sessions</h2><p class="hint">Practice questions based on what was covered each day.</p>`;
+    const sessions = (unit.sessions || []).slice().sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    if(!sessions.length){
+      html += `<p class="small-note">No sessions added yet. Check back once your tutor has added today's material.</p>`;
+    } else {
+      sessions.forEach(session=>{
+        const sessionAnswers = answers.filter(a=>a.sessionId===session.id);
+        html += `<div class="lo-item">
+          <div class="lo-head">
+            <div>
+              <span class="lo-code">${escapeHtml(session.date||'')}</span>
+              <div class="lo-title">${escapeHtml(session.title || '(untitled session)')}</div>
+              <div class="small-note">${sessionAnswers.length ? sessionAnswers.length + " question(s) checked" : "Not attempted yet"}</div>
+            </div>
+            <button class="btn secondary open-session-btn" data-session-id="${session.id}">Practice this session</button>
+          </div>
+        </div>`;
+      });
+    }
     html += `</div>`;
     return html;
   }
 
-  function studentQuestionsHtml(){
+  function studentSessionQuestionsHtml(){
     const unit = state.studentUnit;
-    const lo = unit.los.find(l=>l.id===state.studentLoId);
+    const session = (unit.sessions||[]).find(s=>s.id===state.studentSessionId);
     const qs = state.studentQuestions || [];
     let html = `<div class="card">
-      <button class="link-btn" id="back-to-los-btn">&larr; Back to learning outcomes</button>
-      <h2 style="margin-top:12px;">${escapeHtml(lo.code||'')} — ${escapeHtml(lo.title||'')}</h2>
-      <p class="hint">${escapeHtml(lo.description||'')}</p>`;
+      <button class="link-btn" id="back-to-sessions-btn">&larr; Back to sessions</button>
+      <h2 style="margin-top:12px;">${escapeHtml(session.date||'')} — ${escapeHtml(session.title||'')}</h2>`;
 
     if(!qs.length){
-      html += `<p class="small-note">No practice questions available for this learning outcome yet.</p></div>`;
+      html += `<p class="small-note">No practice questions available for this session yet.</p></div>`;
       return html;
     }
 
     qs.forEach((q,i)=>{
-      const fb = state.gradedFeedback && state.gradedFeedback.loId===lo.id
-        ? state.gradedFeedback.items.find(it=>it.qid===q.id) : null;
+      const fb = state.questionGrades[q.id];
       html += `<div class="q-block">
         <div class="q-number">Question ${i+1}</div>
         <div class="q-text">${escapeHtml(q.question)}</div>
-        <div class="q-targets">${(q.targetCriteria||[]).map(c=>`<span class="stamp neutral">${escapeHtml(c)}</span>`).join("")}</div>
+        <div class="q-targets"><span class="stamp neutral">${escapeHtml(q.loCode||'')}</span>${q.criteriaLabel ? `<span class="stamp neutral">${escapeHtml(q.criteriaLabel)}</span>` : ""}</div>
         <textarea class="answer-box" data-qid="${q.id}" placeholder="Write your response here...">${escapeHtml(state.answers[q.id]||"")}</textarea>
+        <button class="btn secondary check-answer-btn" data-qid="${q.id}">${fb ? "Check again" : "Check this answer"}</button>
         ${fb ? `<div class="feedback-box">
           <div class="band-line">${bandStamp(fb.band, true)}</div>
           <div>${escapeHtml(fb.feedback)}</div>
@@ -687,13 +786,6 @@ const db = getFirestore(fbApp);
       </div>`;
     });
 
-    html += `<button class="btn" id="submit-answers-btn">Submit for grading</button>`;
-    if(state.gradedFeedback && state.gradedFeedback.loId===lo.id){
-      html += `<div class="feedback-box" style="margin-top:16px;border:1px solid var(--line);">
-        <div class="band-line"><b style="font-family:var(--mono);font-size:11px;text-transform:uppercase;">Overall for this attempt:</b> ${bandStamp(state.gradedFeedback.overallBand, true)}</div>
-        <div>${escapeHtml(state.gradedFeedback.overallNote||"")}</div>
-      </div>`;
-    }
     html += `</div>`;
     return html;
   }
@@ -783,12 +875,13 @@ const db = getFirestore(fbApp);
       if(!id){ state.currentUnitId=null; state.currentUnit=null; render(); return; }
       state.currentUnitId = id;
       state.loading = "Loading unit...";
+      state.progressView = null;
       render();
       state.currentUnit = await loadUnit(id);
       state._questionsCache = {};
-      if(state.currentUnit && state.currentUnit.los){
-        for(const lo of state.currentUnit.los){
-          state._questionsCache[lo.id] = await loadQuestions(id, lo.id);
+      if(state.currentUnit && state.currentUnit.sessions){
+        for(const session of state.currentUnit.sessions){
+          state._questionsCache[session.id] = await loadQuestions(id, session.id);
         }
       }
       state.loading = null;
@@ -798,12 +891,13 @@ const db = getFirestore(fbApp);
     const newUnitBtn = document.getElementById("new-unit-btn");
     if(newUnitBtn) newUnitBtn.onclick = async () => {
       const id = uid("unit");
-      const unit = { id, name: "Untitled unit", assignmentBrief:"", slidesText:"", tutorialText:"", los:[] };
+      const unit = { id, name: "Untitled unit", assignmentBrief:"", los:[], sessions:[] };
       await saveUnit(unit);
       state.unitsIndex.push({id, name: unit.name});
       state.currentUnitId = id;
       state.currentUnit = unit;
       state._questionsCache = {};
+      state.progressView = null;
       render();
     };
 
@@ -865,8 +959,6 @@ const db = getFirestore(fbApp);
         state.currentUnit.assignmentBrief = briefText;
         state.currentUnit.los = los;
         await saveUnit(state.currentUnit);
-        state._questionsCache = {};
-        for(const lo of los){ state._questionsCache[lo.id] = []; }
         showToast("Learning outcomes extracted — review and edit below.");
         render();
       }catch(err){
@@ -880,7 +972,6 @@ const db = getFirestore(fbApp);
     if(addLoBtn) addLoBtn.onclick = async () => {
       const lo = {id: uid("lo"), code:"LO"+((state.currentUnit.los.length)+1), title:"", description:"", criteria:{pass:"",merit:"",distinction:""}};
       state.currentUnit.los.push(lo);
-      state._questionsCache[lo.id] = [];
       await saveUnit(state.currentUnit);
       render();
     };
@@ -906,77 +997,105 @@ const db = getFirestore(fbApp);
 
     app.querySelectorAll(".lo-delete-btn").forEach(btn=>{
       btn.onclick = async () => {
-        if(!confirm("Delete this learning outcome and its questions?")) return;
+        if(!confirm("Delete this learning outcome? Existing session questions that were tagged to it will keep their tag as a label only.")) return;
         const loId = btn.dataset.loId;
         state.currentUnit.los = state.currentUnit.los.filter(l=>l.id!==loId);
         await saveUnit(state.currentUnit);
-        try{ await deleteQuestionsDoc(state.currentUnit.id, loId); }catch(e){}
-        delete state._questionsCache[loId];
         render();
       };
     });
 
-    const slidesFile = document.getElementById("slides-file");
-    if(slidesFile) slidesFile.onchange = async () => {
-      const f = slidesFile.files[0]; if(!f) return;
-      document.getElementById("slides-file-meta").textContent = "Extracting text from " + f.name + "...";
+    const newSlidesFile = document.getElementById("new-session-slides-file");
+    if(newSlidesFile) newSlidesFile.onchange = async () => {
+      const f = newSlidesFile.files[0]; if(!f) return;
+      document.getElementById("new-session-slides-meta").textContent = "Extracting text from " + f.name + "...";
       try{
         const text = await extractFile(f);
-        document.getElementById("slides-text").value = text;
-        document.getElementById("slides-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+        document.getElementById("new-session-slides").value = text;
+        document.getElementById("new-session-slides-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
       }catch(err){
-        document.getElementById("slides-file-meta").textContent = "Could not read file: " + err.message;
+        document.getElementById("new-session-slides-meta").textContent = "Could not read file: " + err.message;
       }
     };
-    const tutorialFile = document.getElementById("tutorial-file");
-    if(tutorialFile) tutorialFile.onchange = async () => {
-      const f = tutorialFile.files[0]; if(!f) return;
-      document.getElementById("tutorial-file-meta").textContent = "Extracting text from " + f.name + "...";
+    const newTutorialFile = document.getElementById("new-session-tutorial-file");
+    if(newTutorialFile) newTutorialFile.onchange = async () => {
+      const f = newTutorialFile.files[0]; if(!f) return;
+      document.getElementById("new-session-tutorial-meta").textContent = "Extracting text from " + f.name + "...";
       try{
         const text = await extractFile(f);
-        document.getElementById("tutorial-text").value = text;
-        document.getElementById("tutorial-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+        document.getElementById("new-session-tutorial").value = text;
+        document.getElementById("new-session-tutorial-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
       }catch(err){
-        document.getElementById("tutorial-file-meta").textContent = "Could not read file: " + err.message;
+        document.getElementById("new-session-tutorial-meta").textContent = "Could not read file: " + err.message;
       }
     };
 
-    const saveContentBtn = document.getElementById("save-content-btn");
-    if(saveContentBtn) saveContentBtn.onclick = async () => {
-      state.currentUnit.slidesText = document.getElementById("slides-text").value;
-      state.currentUnit.tutorialText = document.getElementById("tutorial-text").value;
+    const addSessionBtn = document.getElementById("add-session-btn");
+    if(addSessionBtn) addSessionBtn.onclick = async () => {
+      const date = document.getElementById("new-session-date").value.trim() || new Date().toISOString().slice(0,10);
+      const title = document.getElementById("new-session-title").value.trim();
+      const slidesText = document.getElementById("new-session-slides").value;
+      const tutorialText = document.getElementById("new-session-tutorial").value;
+      if(!slidesText.trim() && !tutorialText.trim()){
+        showToast("Add slide or tutorial content for this session first.");
+        return;
+      }
+      const session = { id: uid("session"), date, title, slidesText, tutorialText };
+      state.currentUnit.sessions = state.currentUnit.sessions || [];
+      state.currentUnit.sessions.push(session);
       await saveUnit(state.currentUnit);
-      showToast("Source content saved.");
+      state._questionsCache[session.id] = [];
+      showToast("Session added.");
+      render();
     };
 
-    app.querySelectorAll(".gen-questions-btn").forEach(btn=>{
+    app.querySelectorAll(".delete-session-btn").forEach(btn=>{
       btn.onclick = async () => {
-        const loId = btn.dataset.loId;
-        const lo = state.currentUnit.los.find(l=>l.id===loId);
+        if(!confirm("Delete this session and its questions?")) return;
+        const sessionId = btn.dataset.sessionId;
+        state.currentUnit.sessions = state.currentUnit.sessions.filter(s=>s.id!==sessionId);
+        await saveUnit(state.currentUnit);
+        try{ await deleteQuestionsDoc(state.currentUnit.id, sessionId); }catch(e){}
+        delete state._questionsCache[sessionId];
+        render();
+      };
+    });
+
+    app.querySelectorAll(".gen-session-questions-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const sessionId = btn.dataset.sessionId;
+        const session = state.currentUnit.sessions.find(s=>s.id===sessionId);
         const unit = state.currentUnit;
-        if(!unit.slidesText && !unit.tutorialText){
-          showToast("Add lecture slide or tutorial content first.");
+        if(!unit.los || !unit.los.length){
+          showToast("Add at least one learning outcome first, so questions can be tagged.");
           return;
         }
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span>Generating...';
         try{
-          const sys = "You write practice questions for BTEC HND Level 5 students, strictly scaffolded to help them tackle a specific assignment task and meet specific assessment criteria. Rules: (1) Base every question ONLY on the provided lecture/tutorial content — never introduce theorists, models or frameworks not present in that content. (2) Questions must be scenario/case-based, written at analysis and evaluation level (not simple recall or definitions). (3) Each question should target one or more named criteria for this learning outcome, and should visibly help the student practise the kind of thinking the assignment brief will demand. (4) For each question provide brief model-answer bullet points (grading reference only, not shown to students up front) that a marker would expect to see, referencing only the given source content. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"targetCriteria\": [\"P1\",\"M1\"], \"modelAnswerPoints\": [\"...\", \"...\"]}]}. Generate 4 questions.";
-          const userMsg = "Learning outcome: " + lo.code + " — " + lo.title + "\nDescription: " + lo.description +
-            "\nPass criteria: " + lo.criteria.pass + "\nMerit criteria: " + lo.criteria.merit + "\nDistinction criteria: " + lo.criteria.distinction +
-            "\n\nAssignment brief (for scenario context):\n" + capText(unit.assignmentBrief, 6000) +
-            "\n\nLecture slide content:\n" + capText(unit.slidesText, 9000) +
-            "\n\nTutorial material:\n" + capText(unit.tutorialText, 6000);
+          const loListText = unit.los.map(lo=>lo.code + " — " + lo.title + ": " + lo.description +
+            " | Pass: " + lo.criteria.pass + " | Merit: " + lo.criteria.merit + " | Distinction: " + lo.criteria.distinction).join("\n");
+          const sys = "You write practice questions for BTEC HND Level 5 students, based strictly on what was covered in a single day's lecture/tutorial session. Rules: (1) Base every question ONLY on the provided session content — never introduce theorists, models or frameworks not present in that content. (2) Questions must be scenario/case-based, written at analysis and evaluation level (not simple recall or definitions). (3) For EACH question, pick the single learning outcome (from the list provided) that it best fits, and name the specific Pass/Merit/Distinction criteria codes it addresses. (4) Provide brief model-answer bullet points (grading reference only) referencing only the given session content. Generate 1 to 2 questions only — this is a short daily practice, not a full test. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"loCode\": \"LO1\", \"criteriaLabel\": \"P1, M1\", \"modelAnswerPoints\": [\"...\"]}]}.";
+          const userMsg = "Learning outcomes for this unit:\n" + capText(loListText, 4000) +
+            "\n\nAssignment brief (for scenario context):\n" + capText(unit.assignmentBrief, 3000) +
+            "\n\nThis session's date: " + session.date + (session.title ? " (" + session.title + ")" : "") +
+            "\n\nThis session's lecture slide content:\n" + capText(session.slidesText, 7000) +
+            "\n\nThis session's tutorial material:\n" + capText(session.tutorialText, 5000);
           const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
-          const questions = (result.questions||[]).map(q=>({
-            id: uid("q"),
-            question: q.question,
-            targetCriteria: q.targetCriteria||[],
-            modelAnswerPoints: q.modelAnswerPoints||[]
-          }));
-          await saveQuestions(unit.id, loId, questions);
-          state._questionsCache[loId] = questions;
-          showToast("Questions generated for " + lo.code + ".");
+          const questions = (result.questions||[]).map(q=>{
+            const matchedLo = unit.los.find(lo => (lo.code||"").trim().toLowerCase() === (q.loCode||"").trim().toLowerCase()) || unit.los[0];
+            return {
+              id: uid("q"),
+              question: q.question,
+              loId: matchedLo.id,
+              loCode: matchedLo.code,
+              criteriaLabel: q.criteriaLabel || "",
+              modelAnswerPoints: q.modelAnswerPoints||[]
+            };
+          });
+          await saveQuestions(unit.id, sessionId, questions);
+          state._questionsCache[sessionId] = questions;
+          showToast("Questions generated for " + session.date + ".");
           render();
         }catch(err){
           showToast("Generation failed: " + err.message);
@@ -985,10 +1104,23 @@ const db = getFirestore(fbApp);
         }
       };
     });
-  }
 
-  async function refreshStudentUnitsIfNeeded(){
-    // units index already loaded globally
+    const loadProgressBtn = document.getElementById("load-progress-btn");
+    if(loadProgressBtn) loadProgressBtn.onclick = async () => {
+      loadProgressBtn.disabled = true;
+      loadProgressBtn.innerHTML = '<span class="spinner"></span>Loading...';
+      const students = await loadAllResultsForUnit(state.currentUnit.id);
+      state.progressView = { students };
+      render();
+    };
+
+    app.querySelectorAll(".toggle-progress-btn").forEach(btn=>{
+      btn.onclick = () => {
+        const sid = btn.dataset.studentId;
+        state.progressExpanded[sid] = !state.progressExpanded[sid];
+        render();
+      };
+    });
   }
 
   function attachStudentHandlers(){
@@ -998,7 +1130,7 @@ const db = getFirestore(fbApp);
       if(entered){
         state.studentId = entered;
         localStorage.setItem("unitLedgerStudentId", entered);
-        state.studentResults = {};
+        state.studentResults = null;
         render();
       }
     };
@@ -1006,41 +1138,44 @@ const db = getFirestore(fbApp);
     const sel = document.getElementById("student-unit-select");
     if(sel) sel.onchange = async (e) => {
       const id = e.target.value;
-      state.studentLoId = null;
-      state.gradedFeedback = null;
+      state.studentSessionId = null;
+      state.questionGrades = {};
       if(!id){ state.studentUnitId=null; state.studentUnit=null; render(); return; }
       state.studentUnitId = id;
       state.loading = "Loading...";
       render();
       state.studentUnit = await loadUnit(id);
-      state.studentResults = {};
-      if(state.studentUnit && state.studentUnit.los){
-        for(const lo of state.studentUnit.los){
-          state.studentResults[lo.id] = await loadResults(id, lo.id);
-        }
-      }
+      state.studentResults = await loadResultsForStudent(id);
       state.loading = null;
       render();
     };
 
-    app.querySelectorAll(".open-lo-btn").forEach(btn=>{
+    app.querySelectorAll(".open-session-btn").forEach(btn=>{
       btn.onclick = async () => {
-        const loId = btn.dataset.loId;
-        state.studentLoId = loId;
-        state.gradedFeedback = null;
+        const sessionId = btn.dataset.sessionId;
+        state.studentSessionId = sessionId;
+        state.questionGrades = {};
         state.answers = {};
         state.loading = "Loading questions...";
         render();
-        state.studentQuestions = await loadQuestions(state.studentUnit.id, loId);
+        state.studentQuestions = await loadQuestions(state.studentUnit.id, sessionId);
+        // Restore any grades already recorded for this session so re-visiting shows past feedback.
+        const answers = (state.studentResults && state.studentResults.answers) || {};
+        state.studentQuestions.forEach(q=>{
+          if(answers[q.id]){
+            state.questionGrades[q.id] = { band: answers[q.id].band, feedback: answers[q.id].feedback };
+            state.answers[q.id] = answers[q.id].answer;
+          }
+        });
         state.loading = null;
         render();
       };
     });
 
-    const backBtn = document.getElementById("back-to-los-btn");
+    const backBtn = document.getElementById("back-to-sessions-btn");
     if(backBtn) backBtn.onclick = () => {
-      state.studentLoId = null;
-      state.gradedFeedback = null;
+      state.studentSessionId = null;
+      state.questionGrades = {};
       render();
     };
 
@@ -1048,44 +1183,57 @@ const db = getFirestore(fbApp);
       box.oninput = () => { state.answers[box.dataset.qid] = box.value; };
     });
 
-    const submitBtn = document.getElementById("submit-answers-btn");
-    if(submitBtn) submitBtn.onclick = async () => {
-      const lo = state.studentUnit.los.find(l=>l.id===state.studentLoId);
-      const unit = state.studentUnit;
-      const qs = state.studentQuestions;
-      const unanswered = qs.filter(q => !(state.answers[q.id]||"").trim());
-      if(unanswered.length){
-        showToast("Please answer all questions before submitting.");
-        return;
-      }
-      submitBtn.disabled = true;
-      submitBtn.innerHTML = '<span class="spinner"></span>Grading...';
-      try{
-        const sys = "You are grading a BTEC HND Level 5 student's practice answers, strictly against the provided lecture/tutorial source content and the Pass/Merit/Distinction criteria for this learning outcome. Do not reward or expect content beyond what is in the provided source material. For each answer, decide a band: one of \"notyet\" (not yet meeting Pass), \"pass\", \"merit\", or \"distinction\", reflecting the depth of analysis/evaluation shown against the criteria. Give concise, constructive feedback (2-4 sentences) naming a strength and one concrete improvement tied to the criteria. Then give one overall band for the set and a short overall note. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"items\": [{\"qid\": \"...\", \"band\": \"pass\", \"feedback\": \"...\"}], \"overallBand\": \"merit\", \"overallNote\": \"...\"}.";
-        const userMsg = "Learning outcome: " + lo.code + " — " + lo.title +
-          "\nPass criteria: " + lo.criteria.pass + "\nMerit criteria: " + lo.criteria.merit + "\nDistinction criteria: " + lo.criteria.distinction +
-          "\n\nSource content (slides):\n" + capText(unit.slidesText, 4000) +
-          "\n\nSource content (tutorial):\n" + capText(unit.tutorialText, 4000) +
-          "\n\nQuestions and the student's answers:\n" +
-          qs.map((q,i)=>"Q"+(i+1)+" [qid:"+q.id+"] "+q.question+"\nModel answer points: "+(q.modelAnswerPoints||[]).join("; ")+"\nStudent answer: "+state.answers[q.id]).join("\n\n");
-        const result = await callAI(sys, userMsg, true, GRADING_MODEL);
-        state.gradedFeedback = {
-          loId: lo.id,
-          items: result.items || [],
-          overallBand: result.overallBand || "notyet",
-          overallNote: result.overallNote || ""
-        };
-        const results = state.studentResults[lo.id] || [];
-        results.push({date: new Date().toISOString(), overallBand: state.gradedFeedback.overallBand, overallNote: state.gradedFeedback.overallNote});
-        state.studentResults[lo.id] = results;
-        await saveResults(unit.id, lo.id, results);
-        render();
-      }catch(err){
-        showToast("Grading failed: " + err.message);
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Submit for grading";
-      }
-    };
+    app.querySelectorAll(".check-answer-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const qid = btn.dataset.qid;
+        const answerText = (state.answers[qid] || "").trim();
+        if(!answerText){
+          showToast("Write an answer before checking it.");
+          return;
+        }
+        const unit = state.studentUnit;
+        const session = unit.sessions.find(s=>s.id===state.studentSessionId);
+        const q = state.studentQuestions.find(qq=>qq.id===qid);
+        const lo = unit.los.find(l=>l.id===q.loId) || { code: q.loCode, criteria: {pass:"",merit:"",distinction:""} };
+        const originalLabel = btn.textContent;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Checking...';
+        try{
+          const sys = "You are grading a single BTEC HND Level 5 student practice answer, strictly against the provided lecture/tutorial source content and the Pass/Merit/Distinction criteria for this learning outcome. Do not reward or expect content beyond what is in the provided source material. Decide a band: one of \"notyet\" (not yet meeting Pass), \"pass\", \"merit\", or \"distinction\", reflecting the depth of analysis/evaluation shown against the criteria. Give concise, constructive feedback (2-4 sentences) naming a strength and one concrete improvement tied to the criteria. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"band\": \"pass\", \"feedback\": \"...\"}.";
+          const userMsg = "Learning outcome: " + (lo.code||q.loCode) + (lo.title ? " — " + lo.title : "") +
+            "\nPass criteria: " + (lo.criteria&&lo.criteria.pass||"") + "\nMerit criteria: " + (lo.criteria&&lo.criteria.merit||"") + "\nDistinction criteria: " + (lo.criteria&&lo.criteria.distinction||"") +
+            "\n\nSource content (slides):\n" + capText(session.slidesText, 4000) +
+            "\n\nSource content (tutorial):\n" + capText(session.tutorialText, 4000) +
+            "\n\nQuestion: " + q.question +
+            "\nModel answer points: " + (q.modelAnswerPoints||[]).join("; ") +
+            "\nStudent answer: " + answerText;
+          const result = await callAI(sys, userMsg, true, GRADING_MODEL);
+          const band = result.band || "notyet";
+          const feedback = result.feedback || "";
+          state.questionGrades[qid] = { band, feedback };
+
+          if(!state.studentResults) state.studentResults = { studentId: state.studentId, unitId: unit.id, answers: {} };
+          if(!state.studentResults.answers) state.studentResults.answers = {};
+          state.studentResults.answers[qid] = {
+            question: q.question,
+            sessionId: session.id,
+            sessionDate: session.date,
+            loId: q.loId,
+            loCode: q.loCode,
+            answer: answerText,
+            band,
+            feedback,
+            date: new Date().toISOString()
+          };
+          await saveResultsForStudent(unit.id, state.studentResults);
+          render();
+        }catch(err){
+          showToast("Checking failed: " + err.message);
+          btn.disabled = false;
+          btn.textContent = originalLabel;
+        }
+      };
+    });
   }
 
   // ---------- Init ----------
