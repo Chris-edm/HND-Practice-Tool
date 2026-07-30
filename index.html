@@ -253,6 +253,7 @@ const db = getFirestore(fbApp);
     studentVocabListId: null,
     studentVocabList: null,
     quiz: null, // { items: [{word, meaning, options}], answers: {idx: chosen}, score: null }
+    vocabPreview: null, // array of {id, word, meaning} awaiting confirmation before saving
   };
 
   const PROGRAMME_LABELS = {
@@ -492,6 +493,54 @@ const db = getFirestore(fbApp);
     return a;
   }
 
+  // ---------- Vocabulary list parsing ----------
+  // Handles two common formats:
+  // (A) One clean pair per line: "word - meaning" (dash/colon/equals/tab separated)
+  // (B) A numbered running list with NO separator at all, where the word
+  //     (Latin script) simply runs straight into its Korean meaning, e.g.
+  //     "26 archaeological 고고학적인 27 run off 지표 유출수 28 cultivation 경작"
+  //     — common when a table or multi-column PDF is extracted as flowing text.
+  function parseVocabLineBased(text){
+    const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
+    const out = [];
+    lines.forEach(line=>{
+      const parts = line.split(/\s*[-–—:=\t]\s*/);
+      if(parts.length>=2){
+        const word = parts[0].replace(/^\d+[\.\)]?\s*/, "").trim();
+        const meaning = parts.slice(1).join(" - ").trim();
+        if(word && meaning && word.length<=60 && meaning.length<=150){
+          out.push({word, meaning});
+        }
+      }
+    });
+    return out;
+  }
+  function parseVocabNumberedKorean(text){
+    // number, then Latin-script word/phrase (may itself contain spaces/newlines
+    // if a phrase got split across a page break), then — forced by the lookahead
+    // below — the meaning must start at the first Korean character, running
+    // until the next "<number><Latin letter>" entry-start or end of text.
+    const re = /(\d{1,3})[.)]?\s*([A-Za-z][A-Za-z\-'\s]*?)\s+(?=[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F])([\s\S]*?)(?=\d{1,3}[.)]?\s*[A-Za-z]|$)/g;
+    const out = [];
+    let m;
+    while((m = re.exec(text)) !== null){
+      const word = m[2].trim().replace(/\s+/g," ");
+      const meaning = m[3].trim().replace(/\s+/g," ").replace(/[,\s]+$/,"");
+      if(word && meaning && /[\uAC00-\uD7A3]/.test(meaning) && word.length<=60 && meaning.length<=150){
+        out.push({word, meaning});
+      }
+    }
+    return out;
+  }
+  function parseVocabEntries(text){
+    const a = parseVocabLineBased(text);
+    const b = parseVocabNumberedKorean(text);
+    // Prefer whichever strategy actually matches this document's format —
+    // a well-formed list should parse into roughly one entry per word, so
+    // the strategy producing more plausible entries is the one that fits.
+    return (b.length > a.length) ? b : a;
+  }
+
   // ---------- Rendering ----------
   const app = document.getElementById("app");
 
@@ -559,6 +608,24 @@ const db = getFirestore(fbApp);
     return bands.reduce((worst, b) => (BAND_RANK[b] ?? 0) < (BAND_RANK[worst] ?? 99) ? b : worst, bands[0]);
   }
 
+  // Pearson-style marks summing, for A-Level questions with variable mark tariffs.
+  function marksSummaryFrom(items){
+    // items: [{marksAwarded, maxMarks}]
+    if(!items.length) return null;
+    const awarded = items.reduce((s,i)=>s+(i.marksAwarded||0), 0);
+    const total = items.reduce((s,i)=>s+(i.maxMarks||0), 0);
+    return { awarded, total };
+  }
+  function marksStamp(summary, fresh){
+    if(!summary) return `<span class="stamp neutral">Not attempted</span>`;
+    const pct = summary.total ? (summary.awarded / summary.total) : 0;
+    let cls = "notyet";
+    if(pct >= 0.8) cls = "dist";
+    else if(pct >= 0.6) cls = "merit";
+    else if(pct >= 0.4) cls = "pass";
+    return `<span class="stamp ${cls}${fresh?' fresh':''}">${summary.awarded} / ${summary.total} marks</span>`;
+  }
+
   // ===================== INSTRUCTOR VIEW =====================
   function instructorHtml(){
     const progInfo = PROGRAMME_LABELS[state.programme] || PROGRAMME_LABELS.hnd;
@@ -617,26 +684,36 @@ const db = getFirestore(fbApp);
       </div>
     </div>`;
 
-    // Band labels
-    html += `<div class="card">
-      <h2>Standing bands</h2>
-      <p class="hint">These labels appear on students' badges and in the criteria fields below — rename them to fit ${progInfo.name === "A-Level" ? "your mark scheme" : "your assessment language"}.</p>
-      <div class="row">
-        <div>
-          <label>Tier 1 (lowest)</label>
-          <input type="text" class="band-label-field" data-field="pass" value="${escapeHtml(bandLabels.pass)}">
+    // Marking model: BTEC-style bands, or Pearson-style variable-tariff marks for A-Level
+    const isMarksStyle = unit.programme === "alevel";
+    if(isMarksStyle){
+      html += `<div class="card">
+        <h2>Mark scheme guidance</h2>
+        <p class="hint">Optional general notes on how you want marks awarded for this subject (e.g. AO weighting, how levels-of-response should be applied). This guides the AI when it writes each question's specific mark scheme — it doesn't need to be exhaustive.</p>
+        <textarea id="mark-scheme-guidance" placeholder="e.g. Follow Pearson Edexcel levels-of-response conventions: low-tariff questions (2-4 marks) reward accurate knowledge/application; high-tariff questions (8-25 marks) use levels of response rewarding depth of analysis and evaluation.">${escapeHtml(unit.markSchemeGuidance || "")}</textarea>
+        <button class="btn secondary" id="save-mark-scheme-guidance-btn">Save guidance</button>
+      </div>`;
+    } else {
+      html += `<div class="card">
+        <h2>Standing bands</h2>
+        <p class="hint">These labels appear on students' badges and in the criteria fields below — rename them to fit your assessment language.</p>
+        <div class="row">
+          <div>
+            <label>Tier 1 (lowest)</label>
+            <input type="text" class="band-label-field" data-field="pass" value="${escapeHtml(bandLabels.pass)}">
+          </div>
+          <div>
+            <label>Tier 2</label>
+            <input type="text" class="band-label-field" data-field="merit" value="${escapeHtml(bandLabels.merit)}">
+          </div>
+          <div>
+            <label>Tier 3 (highest)</label>
+            <input type="text" class="band-label-field" data-field="distinction" value="${escapeHtml(bandLabels.distinction)}">
+          </div>
         </div>
-        <div>
-          <label>Tier 2</label>
-          <input type="text" class="band-label-field" data-field="merit" value="${escapeHtml(bandLabels.merit)}">
-        </div>
-        <div>
-          <label>Tier 3 (highest)</label>
-          <input type="text" class="band-label-field" data-field="distinction" value="${escapeHtml(bandLabels.distinction)}">
-        </div>
-      </div>
-      <button class="btn secondary" id="save-band-labels-btn">Save labels</button>
-    </div>`;
+        <button class="btn secondary" id="save-band-labels-btn">Save labels</button>
+      </div>`;
+    }
 
     // Assignment brief
     html += `<div class="card">
@@ -657,7 +734,7 @@ const db = getFirestore(fbApp);
     html += `<div class="card">
       <h2>Learning outcomes</h2>
       <p class="hint">Review and edit what was extracted — each daily session's questions below will be auto-tagged against these.</p>
-      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i,bandLabels)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
+      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i,bandLabels,isMarksStyle)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
       <button class="btn secondary" id="add-lo-btn">+ Add learning outcome manually</button>
     </div>`;
 
@@ -717,8 +794,25 @@ const db = getFirestore(fbApp);
     return html;
   }
 
-  function loEditHtml(lo, i, bandLabels){
+  function loEditHtml(lo, i, bandLabels, isMarksStyle){
     const L = bandLabels || { pass: "Pass", merit: "Merit", distinction: "Distinction" };
+    const criteriaSection = isMarksStyle
+      ? `<label>Topic mark scheme notes (optional)</label>
+         <textarea class="lo-field" data-field="markSchemeNotes" style="min-height:70px;font-size:13px;" placeholder="e.g. Typical tariffs for this topic: 4-mark AO1 questions, 8-mark AO2 application questions, occasional 20-mark AO1+AO2+AO3 essay.">${escapeHtml(lo.markSchemeNotes||'')}</textarea>`
+      : `<div class="criteria-row">
+        <div class="criteria-col">
+          <b>${escapeHtml(L.pass)} criteria</b>
+          <textarea class="lo-field" data-field="pass" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.pass)||'')}</textarea>
+        </div>
+        <div class="criteria-col">
+          <b>${escapeHtml(L.merit)} criteria</b>
+          <textarea class="lo-field" data-field="merit" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.merit)||'')}</textarea>
+        </div>
+        <div class="criteria-col">
+          <b>${escapeHtml(L.distinction)} criteria</b>
+          <textarea class="lo-field" data-field="distinction" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.distinction)||'')}</textarea>
+        </div>
+      </div>`;
     return `<div class="lo-item" data-lo-id="${lo.id}">
       <div class="row">
         <div style="flex:0 0 90px;min-width:90px;">
@@ -732,20 +826,7 @@ const db = getFirestore(fbApp);
       </div>
       <label>Description</label>
       <textarea class="lo-field" data-field="description" style="min-height:50px;">${escapeHtml(lo.description||'')}</textarea>
-      <div class="criteria-row">
-        <div class="criteria-col">
-          <b>${escapeHtml(L.pass)} criteria</b>
-          <textarea class="lo-field" data-field="pass" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.pass)||'')}</textarea>
-        </div>
-        <div class="criteria-col">
-          <b>${escapeHtml(L.merit)} criteria</b>
-          <textarea class="lo-field" data-field="merit" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.merit)||'')}</textarea>
-        </div>
-        <div class="criteria-col">
-          <b>${escapeHtml(L.distinction)} criteria</b>
-          <textarea class="lo-field" data-field="distinction" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.distinction)||'')}</textarea>
-        </div>
-      </div>
+      ${criteriaSection}
       <button class="btn secondary lo-save-btn" data-lo-id="${lo.id}" style="margin-top:10px;">Save LO</button>
       <button class="btn danger lo-delete-btn" data-lo-id="${lo.id}" style="margin-top:10px;">Delete</button>
     </div>`;
@@ -774,9 +855,13 @@ const db = getFirestore(fbApp);
 
   function renderQuestionEditList(qs, unit){
     if(!qs || !qs.length) return `<p class="small-note">No questions generated yet.</p>`;
+    const isMarksStyle = unit.programme === "alevel";
     return qs.map((q,i)=>`<div class="qedit">
-      <div class="q-number">Question ${i+1} — ${escapeHtml(q.loCode||'')}${q.criteriaLabel ? " (" + escapeHtml(q.criteriaLabel) + ")" : ""}</div>
+      <div class="q-number">Question ${i+1} — ${escapeHtml(q.loCode||'')}${isMarksStyle ? " (" + (q.maxMarks||'?') + " marks)" : (q.criteriaLabel ? " (" + escapeHtml(q.criteriaLabel) + ")" : "")}</div>
       <div class="q-text">${escapeHtml(q.question)}</div>
+      ${isMarksStyle && q.markScheme ? `<details><summary class="small-note" style="cursor:pointer;">Mark scheme</summary>
+        <p style="font-size:12.5px;color:var(--ink-soft);white-space:pre-wrap;">${escapeHtml(q.markScheme)}</p>
+      </details>` : ""}
       <details><summary class="small-note" style="cursor:pointer;">Model answer points (for grading reference)</summary>
         <ul style="font-size:12.5px;color:var(--ink-soft);">${(q.modelAnswerPoints||[]).map(p=>`<li>${escapeHtml(p)}</li>`).join("")}</ul>
       </details>
@@ -786,17 +871,20 @@ const db = getFirestore(fbApp);
   function studentProgressListHtml(unit){
     const students = state.progressView.students;
     if(!students.length) return `<p class="small-note">No student attempts recorded yet for this unit.</p>`;
+    const isMarksStyle = unit.programme === "alevel";
     return students.map(s=>{
       const answers = Object.values(s.answers || {});
       const byLo = {};
       answers.forEach(a=>{
         if(!byLo[a.loId]) byLo[a.loId] = [];
-        byLo[a.loId].push(a.band);
+        byLo[a.loId].push(a);
       });
       const loBadges = (unit.los||[]).map(lo=>{
-        const bands = byLo[lo.id];
-        const band = bands && bands.length ? overallBandFrom(bands) : "unattempted";
-        return `<span style="margin-right:8px;">${escapeHtml(lo.code)} ${bandStamp(band, false, unit.bandLabels)}</span>`;
+        const items = byLo[lo.id];
+        const badge = isMarksStyle
+          ? marksStamp(items && items.length ? marksSummaryFrom(items) : null)
+          : bandStamp(items && items.length ? overallBandFrom(items.map(a=>a.band)) : "unattempted", false, unit.bandLabels);
+        return `<span style="margin-right:8px;">${escapeHtml(lo.code)} ${badge}</span>`;
       }).join("");
       const expanded = !!state.progressExpanded[s.studentId];
       const sortedAnswers = answers.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -814,7 +902,7 @@ const db = getFirestore(fbApp);
             <div class="q-text" style="font-size:14px;">${escapeHtml(a.question||'')}</div>
             <div class="small-note"><b>Answer:</b> ${escapeHtml(a.answer||'')}</div>
             <div class="feedback-box">
-              <div class="band-line">${bandStamp(a.band, false, unit.bandLabels)}</div>
+              <div class="band-line">${isMarksStyle ? marksStamp({awarded:a.marksAwarded||0, total:a.maxMarks||0}) : bandStamp(a.band, false, unit.bandLabels)}</div>
               <div>${escapeHtml(a.feedback||'')}</div>
             </div>
           </div>`).join("")}
@@ -856,21 +944,24 @@ const db = getFirestore(fbApp);
 
   function studentUnitLandingHtml(){
     const unit = state.studentUnit;
+    const isMarksStyle = unit.programme === "alevel";
     const answers = Object.values((state.studentResults && state.studentResults.answers) || {});
     let html = `<div class="card"><h2>${escapeHtml(unit.name)}</h2>`;
 
     if(unit.los && unit.los.length){
       html += `<p class="hint">Your current standing against each learning outcome, based on everything you've checked so far.</p>`;
       unit.los.forEach(lo=>{
-        const bands = answers.filter(a=>a.loId===lo.id).map(a=>a.band);
-        const band = bands.length ? overallBandFrom(bands) : "unattempted";
+        const loAnswers = answers.filter(a=>a.loId===lo.id);
+        const badge = isMarksStyle
+          ? marksStamp(loAnswers.length ? marksSummaryFrom(loAnswers) : null)
+          : bandStamp(loAnswers.length ? overallBandFrom(loAnswers.map(a=>a.band)) : "unattempted", false, unit.bandLabels);
         html += `<div class="lo-item">
           <div class="lo-head">
             <div>
               <span class="lo-code">${escapeHtml(lo.code||'')}</span>
               <div class="lo-title">${escapeHtml(lo.title||'')}</div>
             </div>
-            ${bandStamp(band, false, unit.bandLabels)}
+            ${badge}
           </div>
         </div>`;
       });
@@ -904,6 +995,7 @@ const db = getFirestore(fbApp);
     const unit = state.studentUnit;
     const session = (unit.sessions||[]).find(s=>s.id===state.studentSessionId);
     const qs = state.studentQuestions || [];
+    const isMarksStyle = unit.programme === "alevel";
     let html = `<div class="card">
       <button class="link-btn" id="back-to-sessions-btn">&larr; Back to sessions</button>
       <h2 style="margin-top:12px;">${escapeHtml(session.date||'')} — ${escapeHtml(session.title||'')}</h2>`;
@@ -916,13 +1008,13 @@ const db = getFirestore(fbApp);
     qs.forEach((q,i)=>{
       const fb = state.questionGrades[q.id];
       html += `<div class="q-block">
-        <div class="q-number">Question ${i+1}</div>
+        <div class="q-number">Question ${i+1}${isMarksStyle ? ` — [${q.maxMarks||'?'} marks]` : ""}</div>
         <div class="q-text">${escapeHtml(q.question)}</div>
-        <div class="q-targets"><span class="stamp neutral">${escapeHtml(q.loCode||'')}</span>${q.criteriaLabel ? `<span class="stamp neutral">${escapeHtml(q.criteriaLabel)}</span>` : ""}</div>
+        <div class="q-targets"><span class="stamp neutral">${escapeHtml(q.loCode||'')}</span>${(!isMarksStyle && q.criteriaLabel) ? `<span class="stamp neutral">${escapeHtml(q.criteriaLabel)}</span>` : ""}</div>
         <textarea class="answer-box" data-qid="${q.id}" placeholder="Write your response here...">${escapeHtml(state.answers[q.id]||"")}</textarea>
         <button class="btn secondary check-answer-btn" data-qid="${q.id}">${fb ? "Check again" : "Check this answer"}</button>
         ${fb ? `<div class="feedback-box">
-          <div class="band-line">${bandStamp(fb.band, true, unit.bandLabels)}</div>
+          <div class="band-line">${isMarksStyle ? marksStamp({awarded:fb.marksAwarded, total:fb.maxMarks}, true) : bandStamp(fb.band, true, unit.bandLabels)}</div>
           <div>${escapeHtml(fb.feedback)}</div>
         </div>` : ""}
       </div>`;
@@ -1099,6 +1191,13 @@ const db = getFirestore(fbApp);
       render();
     };
 
+    const saveMarkSchemeGuidanceBtn = document.getElementById("save-mark-scheme-guidance-btn");
+    if(saveMarkSchemeGuidanceBtn) saveMarkSchemeGuidanceBtn.onclick = async () => {
+      state.currentUnit.markSchemeGuidance = document.getElementById("mark-scheme-guidance").value;
+      await saveUnit(state.currentUnit);
+      showToast("Mark scheme guidance saved.");
+    };
+
     const deleteUnitBtn = document.getElementById("delete-unit-btn");
     if(deleteUnitBtn) deleteUnitBtn.onclick = async () => {
       if(!confirm("Delete this unit? This cannot be undone.")) return;
@@ -1253,6 +1352,7 @@ const db = getFirestore(fbApp);
         const sessionId = btn.dataset.sessionId;
         const session = state.currentUnit.sessions.find(s=>s.id===sessionId);
         const unit = state.currentUnit;
+        const isMarksStyle = unit.programme === "alevel";
         if(!unit.los || !unit.los.length){
           showToast("Add at least one learning outcome first, so questions can be tagged.");
           return;
@@ -1260,25 +1360,44 @@ const db = getFirestore(fbApp);
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span>Generating...';
         try{
-          const loListText = unit.los.map(lo=>lo.code + " — " + lo.title + ": " + lo.description +
-            " | Pass: " + lo.criteria.pass + " | Merit: " + lo.criteria.merit + " | Distinction: " + lo.criteria.distinction).join("\n");
-          const sys = "You write practice questions for BTEC HND Level 5 students, based strictly on what was covered in a single day's lecture/tutorial session. Rules: (1) Base every question ONLY on the provided session content — never introduce theorists, models or frameworks not present in that content. (2) Questions must be scenario/case-based, written at analysis and evaluation level (not simple recall or definitions). (3) For EACH question, pick the single learning outcome (from the list provided) that it best fits, and name the specific Pass/Merit/Distinction criteria codes it addresses. (4) Provide brief model-answer bullet points (grading reference only) referencing only the given session content. Generate 1 to 2 questions only — this is a short daily practice, not a full test. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"loCode\": \"LO1\", \"criteriaLabel\": \"P1, M1\", \"modelAnswerPoints\": [\"...\"]}]}.";
-          const userMsg = "Learning outcomes for this unit:\n" + capText(loListText, 4000) +
-            "\n\nAssignment brief (for scenario context):\n" + capText(unit.assignmentBrief, 3000) +
-            "\n\nThis session's date: " + session.date + (session.title ? " (" + session.title + ")" : "") +
-            "\n\nThis session's lecture slide content:\n" + capText(session.slidesText, 7000) +
-            "\n\nThis session's tutorial material:\n" + capText(session.tutorialText, 5000);
+          let sys, userMsg;
+          if(isMarksStyle){
+            const loListText = unit.los.map(lo=>lo.code + " — " + lo.title + ": " + lo.description +
+              (lo.markSchemeNotes ? " | Mark scheme notes: " + lo.markSchemeNotes : "")).join("\n");
+            sys = "You write exam-style practice questions for A-Level students, following Pearson (Edexcel) conventions, based strictly on what was covered in a single day's lecture/tutorial session. Rules: (1) Base every question ONLY on the provided session content. (2) For EACH question, pick the single topic (from the list provided) it best fits, and assign a realistic Pearson-style mark tariff (vary these across the set — e.g. a 2-4 mark AO1/recall-and-apply question and, where the content supports it, a higher-tariff 6-12 mark question requiring analysis/evaluation with a levels-of-response mark scheme). (3) Write a specific mark scheme for each question as short numbered levels scaled to its own max marks (e.g. for an 8-mark question: 'Level 1 (1-2 marks): ...; Level 2 (3-5 marks): ...; Level 3 (6-8 marks): ...'). (4) Provide brief model-answer bullet points referencing only the given content. Generate 1 to 2 questions only — this is a short daily practice, not a full test. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"loCode\": \"LO1\", \"maxMarks\": 8, \"markScheme\": \"Level 1 (1-2 marks): ...\\nLevel 2 (3-5 marks): ...\\nLevel 3 (6-8 marks): ...\", \"modelAnswerPoints\": [\"...\"]}]}.";
+            userMsg = "Topics for this subject:\n" + capText(loListText, 4000) +
+              "\n\nGeneral mark scheme guidance for this subject:\n" + capText(unit.markSchemeGuidance, 2000) +
+              "\n\nAssignment/spec context:\n" + capText(unit.assignmentBrief, 3000) +
+              "\n\nThis session's date: " + session.date + (session.title ? " (" + session.title + ")" : "") +
+              "\n\nThis session's lecture slide content:\n" + capText(session.slidesText, 7000) +
+              "\n\nThis session's tutorial material:\n" + capText(session.tutorialText, 5000);
+          } else {
+            const loListText = unit.los.map(lo=>lo.code + " — " + lo.title + ": " + lo.description +
+              " | Pass: " + lo.criteria.pass + " | Merit: " + lo.criteria.merit + " | Distinction: " + lo.criteria.distinction).join("\n");
+            sys = "You write practice questions for BTEC HND Level 5 students, based strictly on what was covered in a single day's lecture/tutorial session. Rules: (1) Base every question ONLY on the provided session content — never introduce theorists, models or frameworks not present in that content. (2) Questions must be scenario/case-based, written at analysis and evaluation level (not simple recall or definitions). (3) For EACH question, pick the single learning outcome (from the list provided) that it best fits, and name the specific Pass/Merit/Distinction criteria codes it addresses. (4) Provide brief model-answer bullet points (grading reference only) referencing only the given session content. Generate 1 to 2 questions only — this is a short daily practice, not a full test. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"loCode\": \"LO1\", \"criteriaLabel\": \"P1, M1\", \"modelAnswerPoints\": [\"...\"]}]}.";
+            userMsg = "Learning outcomes for this unit:\n" + capText(loListText, 4000) +
+              "\n\nAssignment brief (for scenario context):\n" + capText(unit.assignmentBrief, 3000) +
+              "\n\nThis session's date: " + session.date + (session.title ? " (" + session.title + ")" : "") +
+              "\n\nThis session's lecture slide content:\n" + capText(session.slidesText, 7000) +
+              "\n\nThis session's tutorial material:\n" + capText(session.tutorialText, 5000);
+          }
           const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
           const questions = (result.questions||[]).map(q=>{
             const matchedLo = unit.los.find(lo => (lo.code||"").trim().toLowerCase() === (q.loCode||"").trim().toLowerCase()) || unit.los[0];
-            return {
+            const base = {
               id: uid("q"),
               question: q.question,
               loId: matchedLo.id,
               loCode: matchedLo.code,
-              criteriaLabel: q.criteriaLabel || "",
               modelAnswerPoints: q.modelAnswerPoints||[]
             };
+            if(isMarksStyle){
+              base.maxMarks = Math.max(1, parseInt(q.maxMarks,10) || 4);
+              base.markScheme = q.markScheme || "";
+            } else {
+              base.criteriaLabel = q.criteriaLabel || "";
+            }
+            return base;
           });
           await saveQuestions(unit.id, sessionId, questions);
           state._questionsCache[sessionId] = questions;
@@ -1379,6 +1498,7 @@ const db = getFirestore(fbApp);
           return;
         }
         const unit = state.studentUnit;
+        const isMarksStyle = unit.programme === "alevel";
         const session = unit.sessions.find(s=>s.id===state.studentSessionId);
         const q = state.studentQuestions.find(qq=>qq.id===qid);
         const lo = unit.los.find(l=>l.id===q.loId) || { code: q.loCode, criteria: {pass:"",merit:"",distinction:""} };
@@ -1386,32 +1506,54 @@ const db = getFirestore(fbApp);
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span>Checking...';
         try{
-          const sys = "You are grading a single BTEC HND Level 5 student practice answer, strictly against the provided lecture/tutorial source content and the Pass/Merit/Distinction criteria for this learning outcome. Do not reward or expect content beyond what is in the provided source material. Decide a band: one of \"notyet\" (not yet meeting Pass), \"pass\", \"merit\", or \"distinction\", reflecting the depth of analysis/evaluation shown against the criteria. Give concise, constructive feedback (2-4 sentences) naming a strength and one concrete improvement tied to the criteria. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"band\": \"pass\", \"feedback\": \"...\"}.";
-          const userMsg = "Learning outcome: " + (lo.code||q.loCode) + (lo.title ? " — " + lo.title : "") +
-            "\nPass criteria: " + (lo.criteria&&lo.criteria.pass||"") + "\nMerit criteria: " + (lo.criteria&&lo.criteria.merit||"") + "\nDistinction criteria: " + (lo.criteria&&lo.criteria.distinction||"") +
-            "\n\nSource content (slides):\n" + capText(session.slidesText, 4000) +
-            "\n\nSource content (tutorial):\n" + capText(session.tutorialText, 4000) +
-            "\n\nQuestion: " + q.question +
-            "\nModel answer points: " + (q.modelAnswerPoints||[]).join("; ") +
-            "\nStudent answer: " + answerText;
+          let sys, userMsg;
+          if(isMarksStyle){
+            sys = "You are marking a single A-Level practice answer following Pearson (Edexcel) conventions, strictly against the provided lecture/tutorial source content and this question's own mark scheme. Do not reward or expect content beyond what is in the provided source material. Award a specific whole-number mark from 0 up to the question's maximum. Give concise, constructive feedback (2-4 sentences) naming which level of the mark scheme was met and one concrete improvement. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"marksAwarded\": 6, \"feedback\": \"...\"}.";
+            userMsg = "Topic: " + (lo.code||q.loCode) + (lo.title ? " — " + lo.title : "") +
+              "\n\nSource content (slides):\n" + capText(session.slidesText, 4000) +
+              "\n\nSource content (tutorial):\n" + capText(session.tutorialText, 4000) +
+              "\n\nQuestion (" + (q.maxMarks||'?') + " marks): " + q.question +
+              "\nMark scheme:\n" + (q.markScheme||"") +
+              "\nModel answer points: " + (q.modelAnswerPoints||[]).join("; ") +
+              "\nStudent answer: " + answerText;
+          } else {
+            sys = "You are grading a single BTEC HND Level 5 student practice answer, strictly against the provided lecture/tutorial source content and the Pass/Merit/Distinction criteria for this learning outcome. Do not reward or expect content beyond what is in the provided source material. Decide a band: one of \"notyet\" (not yet meeting Pass), \"pass\", \"merit\", or \"distinction\", reflecting the depth of analysis/evaluation shown against the criteria. Give concise, constructive feedback (2-4 sentences) naming a strength and one concrete improvement tied to the criteria. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"band\": \"pass\", \"feedback\": \"...\"}.";
+            userMsg = "Learning outcome: " + (lo.code||q.loCode) + (lo.title ? " — " + lo.title : "") +
+              "\nPass criteria: " + (lo.criteria&&lo.criteria.pass||"") + "\nMerit criteria: " + (lo.criteria&&lo.criteria.merit||"") + "\nDistinction criteria: " + (lo.criteria&&lo.criteria.distinction||"") +
+              "\n\nSource content (slides):\n" + capText(session.slidesText, 4000) +
+              "\n\nSource content (tutorial):\n" + capText(session.tutorialText, 4000) +
+              "\n\nQuestion: " + q.question +
+              "\nModel answer points: " + (q.modelAnswerPoints||[]).join("; ") +
+              "\nStudent answer: " + answerText;
+          }
           const result = await callAI(sys, userMsg, true, GRADING_MODEL);
-          const band = result.band || "notyet";
           const feedback = result.feedback || "";
-          state.questionGrades[qid] = { band, feedback };
+          let gradeRecord, resultRecord;
+          if(isMarksStyle){
+            const maxMarks = q.maxMarks || 0;
+            let marksAwarded = parseInt(result.marksAwarded, 10);
+            if(isNaN(marksAwarded)) marksAwarded = 0;
+            marksAwarded = Math.max(0, Math.min(maxMarks, marksAwarded));
+            gradeRecord = { marksAwarded, maxMarks, feedback };
+            resultRecord = { marksAwarded, maxMarks, feedback };
+          } else {
+            const band = result.band || "notyet";
+            gradeRecord = { band, feedback };
+            resultRecord = { band, feedback };
+          }
+          state.questionGrades[qid] = gradeRecord;
 
           if(!state.studentResults) state.studentResults = { studentId: state.studentId, unitId: unit.id, answers: {} };
           if(!state.studentResults.answers) state.studentResults.answers = {};
-          state.studentResults.answers[qid] = {
+          state.studentResults.answers[qid] = Object.assign({
             question: q.question,
             sessionId: session.id,
             sessionDate: session.date,
             loId: q.loId,
             loCode: q.loCode,
             answer: answerText,
-            band,
-            feedback,
             date: new Date().toISOString()
-          };
+          }, resultRecord);
           await saveResultsForStudent(unit.id, state.studentResults);
           render();
         }catch(err){
@@ -1456,13 +1598,14 @@ const db = getFirestore(fbApp);
 
     html += `<div class="card">
       <h2>Add words</h2>
-      <p class="hint">Paste one word per line, as <code>word - meaning</code> (a dash, colon, equals sign, or tab also work as the separator).</p>
+      <p class="hint">Paste your list — either one clean <code>word - meaning</code> pair per line, or a running numbered list straight from a document (number, English word, Korean meaning, next number...). Either way, you'll get a chance to review and fix the parsed list before it's saved.</p>
       <textarea id="vocab-paste" placeholder="ubiquitous - 어디에나 있는&#10;meticulous - 꼼꼼한"></textarea>
       <label class="file-btn">Upload a word list (.pdf, .pptx, or .docx)
         <input type="file" id="vocab-file" accept=".pdf,.pptx,.docx">
       </label>
       <div class="file-meta" id="vocab-file-meta"></div>
-      <button class="btn" id="add-words-btn">+ Add these words</button>
+      <button class="btn" id="preview-words-btn">Preview parsed words</button>
+      ${state.vocabPreview ? vocabPreviewHtml() : ""}
     </div>`;
 
     html += `<div class="card">
@@ -1484,6 +1627,23 @@ const db = getFirestore(fbApp);
 
     return html;
   }
+
+  function vocabPreviewHtml(){
+    const preview = state.vocabPreview;
+    return `<div style="margin-top:16px;border-top:2px solid var(--ink);padding-top:14px;">
+      <p class="hint">Found ${preview.length} entries. Check them over — fix or delete any that look wrong — then confirm.</p>
+      <div id="vocab-preview-rows">
+        ${preview.map(p=>`<div class="row" data-preview-id="${p.id}" style="align-items:center;gap:8px;margin-bottom:6px;">
+          <input type="text" class="preview-word-field" data-preview-id="${p.id}" value="${escapeHtml(p.word)}" style="flex:1;">
+          <input type="text" class="preview-meaning-field" data-preview-id="${p.id}" value="${escapeHtml(p.meaning)}" style="flex:1.4;">
+          <button type="button" class="btn danger delete-preview-btn" data-preview-id="${p.id}" style="margin:0;padding:8px 12px;">✕</button>
+        </div>`).join("")}
+      </div>
+      <button class="btn" id="confirm-preview-btn">Confirm &amp; add ${preview.length} word(s)</button>
+      <button class="btn secondary" id="cancel-preview-btn">Cancel</button>
+    </div>`;
+  }
+
 
   function attachInstructorVocabHandlers(){
     const sel = document.getElementById("vocab-list-select");
@@ -1543,25 +1703,52 @@ const db = getFirestore(fbApp);
       }
     };
 
-    const addWordsBtn = document.getElementById("add-words-btn");
-    if(addWordsBtn) addWordsBtn.onclick = async () => {
+    const previewWordsBtn = document.getElementById("preview-words-btn");
+    if(previewWordsBtn) previewWordsBtn.onclick = () => {
       const raw = document.getElementById("vocab-paste").value;
-      const lines = raw.split("\n").map(l=>l.trim()).filter(Boolean);
-      const newWords = [];
-      lines.forEach(line=>{
-        const parts = line.split(/\s*[-–—:=\t]\s*/);
-        if(parts.length>=2){
-          const word = parts[0].trim();
-          const meaning = parts.slice(1).join(" - ").trim();
-          if(word && meaning) newWords.push({id: uid("w"), word, meaning});
-        }
-      });
-      if(!newWords.length){
-        showToast("Couldn't find any 'word - meaning' pairs. Check the format and try again.");
+      const parsed = parseVocabEntries(raw);
+      if(!parsed.length){
+        showToast("Couldn't find any word/meaning pairs. Check the format and try again.");
         return;
       }
+      state.vocabPreview = parsed.map(p => ({ id: uid("wp"), word: p.word, meaning: p.meaning }));
+      render();
+    };
+
+    app.querySelectorAll(".preview-word-field").forEach(f=>{
+      f.oninput = () => {
+        const p = state.vocabPreview.find(x=>x.id===f.dataset.previewId);
+        if(p) p.word = f.value;
+      };
+    });
+    app.querySelectorAll(".preview-meaning-field").forEach(f=>{
+      f.oninput = () => {
+        const p = state.vocabPreview.find(x=>x.id===f.dataset.previewId);
+        if(p) p.meaning = f.value;
+      };
+    });
+    app.querySelectorAll(".delete-preview-btn").forEach(btn=>{
+      btn.onclick = () => {
+        state.vocabPreview = state.vocabPreview.filter(p=>p.id!==btn.dataset.previewId);
+        render();
+      };
+    });
+
+    const cancelPreviewBtn = document.getElementById("cancel-preview-btn");
+    if(cancelPreviewBtn) cancelPreviewBtn.onclick = () => {
+      state.vocabPreview = null;
+      render();
+    };
+
+    const confirmPreviewBtn = document.getElementById("confirm-preview-btn");
+    if(confirmPreviewBtn) confirmPreviewBtn.onclick = async () => {
+      const newWords = state.vocabPreview
+        .filter(p => p.word.trim() && p.meaning.trim())
+        .map(p => ({ id: uid("w"), word: p.word.trim(), meaning: p.meaning.trim() }));
       state.currentVocabList.words = (state.currentVocabList.words||[]).concat(newWords);
       await saveVocabList(state.currentVocabList);
+      state.vocabPreview = null;
+      document.getElementById("vocab-paste").value = "";
       showToast(newWords.length + " word(s) added.");
       render();
     };
