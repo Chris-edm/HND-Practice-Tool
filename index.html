@@ -58,6 +58,29 @@
   }
   .mode-toggle button.active{background:var(--ink);color:#fff;}
 
+  .programme-switcher{
+    display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;
+  }
+  .programme-switcher button{
+    font-family:var(--mono);font-size:11.5px;text-transform:uppercase;letter-spacing:0.6px;font-weight:600;
+    background:#fff;color:var(--ink-soft);border:1.5px solid var(--line);border-radius:var(--radius);
+    padding:8px 16px;cursor:pointer;
+  }
+  .programme-switcher button.active{background:var(--folder);color:var(--ink);border-color:var(--folder-dark);}
+
+  .quiz-option{
+    display:block;width:100%;text-align:left;font-family:var(--sans);font-size:14px;
+    background:#fff;border:1.5px solid var(--line);border-radius:var(--radius);
+    padding:10px 14px;margin-bottom:8px;cursor:pointer;
+  }
+  .quiz-option:hover{border-color:var(--ink-soft);}
+  .quiz-option.selected{border-color:var(--ink);background:var(--paper);font-weight:600;}
+  .quiz-option.correct{border-color:var(--dist);background:var(--dist-bg);color:var(--dist);}
+  .quiz-option.incorrect{border-color:var(--notyet);background:var(--notyet-bg);color:var(--notyet);}
+  .word-row{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);}
+  .word-row .w{flex:1;font-weight:600;}
+  .word-row .m{flex:1;color:var(--ink-soft);}
+
   /* Cards */
   .card{
     background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius);
@@ -204,6 +227,7 @@ const db = getFirestore(fbApp);
   // ---------- State ----------
   let state = {
     mode: "student", // instructor | student
+    programme: "hnd", // hnd | alevel | vocab
     unitsIndex: [], // [{id,name}]
     currentUnitId: null,
     currentUnit: null, // full unit object when loaded
@@ -221,6 +245,19 @@ const db = getFirestore(fbApp);
     studentId: localStorage.getItem("unitLedgerStudentId") || "",
     progressView: null, // { students: [{studentId, answers}] } for instructor's Student Progress panel
     progressExpanded: {}, // studentId -> bool
+
+    // Vocabulary module
+    vocabListsIndex: [], // [{id,name}]
+    currentVocabListId: null,
+    currentVocabList: null,
+    studentVocabListId: null,
+    studentVocabList: null,
+    quiz: null, // { items: [{word, meaning, options}], answers: {idx: chosen}, score: null }
+  };
+
+  const PROGRAMME_LABELS = {
+    hnd: { name: "BTEC HND", unitWord: "Unit", defaultBands: { pass: "Pass", merit: "Merit", distinction: "Distinction" } },
+    alevel: { name: "A-Level", unitWord: "Subject", defaultBands: { pass: "Developing", merit: "Secure", distinction: "Excellent" } },
   };
 
   function uid(prefix){ return prefix + "_" + Math.random().toString(36).slice(2,10); }
@@ -341,7 +378,9 @@ const db = getFirestore(fbApp);
   async function loadUnitsIndex(){
     try{
       const snap = await getDocs(collection(db, "units"));
-      state.unitsIndex = snap.docs.map(d => ({ id: d.id, name: (d.data().name || "Untitled unit") }));
+      state.unitsIndex = snap.docs
+        .filter(d => (d.data().programme || "hnd") === state.programme)
+        .map(d => ({ id: d.id, name: (d.data().name || "Untitled unit") }));
     }catch(e){ state.unitsIndex = []; showToast("Could not load units: " + e.message); }
   }
   async function loadUnit(unitId){
@@ -390,12 +429,89 @@ const db = getFirestore(fbApp);
     }catch(e){ showToast("Could not load student progress: " + e.message); return []; }
   }
 
+  // ---------- Vocabulary storage helpers ----------
+  async function loadVocabListsIndex(){
+    try{
+      const snap = await getDocs(collection(db, "vocabLists"));
+      state.vocabListsIndex = snap.docs.map(d => ({ id: d.id, name: (d.data().name || "Untitled list") }));
+    }catch(e){ state.vocabListsIndex = []; showToast("Could not load word lists: " + e.message); }
+  }
+  async function loadVocabList(listId){
+    try{
+      const snap = await getDoc(doc(db, "vocabLists", listId));
+      return snap.exists() ? snap.data() : null;
+    }catch(e){ showToast("Could not load word list: " + e.message); return null; }
+  }
+  async function saveVocabList(list){
+    await setDoc(doc(db, "vocabLists", list.id), list);
+  }
+  async function deleteVocabListDoc(listId){
+    await deleteDoc(doc(db, "vocabLists", listId));
+  }
+
+  // ---------- Minimal client-side .docx builder (via JSZip) ----------
+  function escapeXml(s){
+    return String(s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;"}[c]));
+  }
+  function docxParagraph(text, opts){
+    opts = opts || {};
+    const bold = opts.bold ? "<w:b/>" : "";
+    const size = opts.size ? `<w:sz w:val="${opts.size}"/>` : "";
+    const spacing = opts.spaceAfter ? ` w:after="${opts.spaceAfter}"` : "";
+    return `<w:p><w:pPr><w:spacing${spacing}/></w:pPr><w:r><w:rPr>${bold}${size}</w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`;
+  }
+  async function buildAndDownloadDocx(filename, paragraphXmlList){
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`);
+    zip.folder("_rels").file(".rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`);
+    zip.folder("word").file("document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>${paragraphXmlList.join("")}<w:sectPr/></w:body>
+</w:document>`);
+    const blob = await zip.generateAsync({type:"blob", mimeType:"application/vnd.openxmlformats-officedocument.wordprocessingml.document"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 2000);
+  }
+  function shuffleArray(arr){
+    const a = arr.slice();
+    for(let i=a.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [a[i],a[j]] = [a[j],a[i]];
+    }
+    return a;
+  }
+
   // ---------- Rendering ----------
   const app = document.getElementById("app");
 
   function render(){
-    app.innerHTML = topbarHtml() + (state.mode === "instructor" ? instructorHtml() : studentHtml());
+    app.innerHTML = topbarHtml() + programmeSwitcherHtml() +
+      (state.programme === "vocab"
+        ? (state.mode === "instructor" ? instructorVocabHtml() : studentVocabHtml())
+        : (state.mode === "instructor" ? instructorHtml() : studentHtml()));
     attachHandlers();
+  }
+
+  function programmeSwitcherHtml(){
+    const items = [
+      { key: "hnd", label: "BTEC HND" },
+      { key: "alevel", label: "A-Level" },
+      { key: "vocab", label: "Vocabulary" }
+    ];
+    return `<div class="programme-switcher">
+      ${items.map(p => `<button data-programme="${p.key}" class="${state.programme===p.key?'active':''}">${p.label}</button>`).join("")}
+    </div>`;
   }
 
   function topbarHtml(){
@@ -421,12 +537,13 @@ const db = getFirestore(fbApp);
     </div>`;
   }
 
-  function bandStamp(band, fresh){
+  function bandStamp(band, fresh, labels){
+    const L = labels || {};
     const map = {
-      pass:{cls:"pass", label:"Pass standard"},
-      merit:{cls:"merit", label:"Merit standard"},
-      distinction:{cls:"dist", label:"Distinction standard"},
-      notyet:{cls:"notyet", label:"Not yet meeting Pass"},
+      pass:{cls:"pass", label:(L.pass||"Pass") + " standard"},
+      merit:{cls:"merit", label:(L.merit||"Merit") + " standard"},
+      distinction:{cls:"dist", label:(L.distinction||"Distinction") + " standard"},
+      notyet:{cls:"notyet", label:"Not yet meeting " + (L.pass||"Pass")},
       unattempted:{cls:"neutral", label:"Not attempted"}
     };
     const m = map[band] || map.unattempted;
@@ -435,7 +552,7 @@ const db = getFirestore(fbApp);
 
   const BAND_RANK = { notyet: 0, pass: 1, merit: 2, distinction: 3 };
   // Overall standing for a set of questions is the weakest band achieved —
-  // consistent with BTEC criterion-referencing, where every relevant
+  // consistent with criterion-referencing, where every relevant
   // criterion needs to be met for a band to count.
   function overallBandFrom(bands){
     if(!bands.length) return "unattempted";
@@ -444,17 +561,18 @@ const db = getFirestore(fbApp);
 
   // ===================== INSTRUCTOR VIEW =====================
   function instructorHtml(){
+    const progInfo = PROGRAMME_LABELS[state.programme] || PROGRAMME_LABELS.hnd;
     let html = "";
     html += centreSettingsHtml();
     html += `<div class="card">
-      <h2>Units</h2>
-      <p class="hint">Create a unit record, attach the assignment brief and source content, then generate practice questions per learning outcome.</p>
+      <h2>${progInfo.unitWord}s</h2>
+      <p class="hint">Create a ${progInfo.unitWord.toLowerCase()} record, attach the assignment brief and source content, then generate practice questions per learning outcome.</p>
       <div class="unit-select-row">
         <select id="unit-select">
-          <option value="">— Select a unit —</option>
+          <option value="">— Select a ${progInfo.unitWord.toLowerCase()} —</option>
           ${state.unitsIndex.map(u=>`<option value="${u.id}" ${state.currentUnitId===u.id?'selected':''}>${escapeHtml(u.name)}</option>`).join("")}
         </select>
-        <button class="btn secondary" id="new-unit-btn">+ New Unit</button>
+        <button class="btn secondary" id="new-unit-btn">+ New ${progInfo.unitWord}</button>
       </div>
     </div>`;
 
@@ -488,19 +606,42 @@ const db = getFirestore(fbApp);
   }
 
   function unitWorkspaceHtml(unit){
+    const progInfo = PROGRAMME_LABELS[state.programme] || PROGRAMME_LABELS.hnd;
+    const bandLabels = unit.bandLabels || progInfo.defaultBands;
     let html = `<div class="card">
-      <label>Unit name</label>
+      <label>${progInfo.unitWord} name</label>
       <input type="text" id="unit-name" value="${escapeHtml(unit.name)}" placeholder="e.g. Unit 3: Human Resource Management">
       <div class="row">
         <button class="btn secondary" id="save-unit-name-btn">Save name</button>
-        <button class="btn danger" id="delete-unit-btn">Delete unit</button>
+        <button class="btn danger" id="delete-unit-btn">Delete ${progInfo.unitWord.toLowerCase()}</button>
       </div>
+    </div>`;
+
+    // Band labels
+    html += `<div class="card">
+      <h2>Standing bands</h2>
+      <p class="hint">These labels appear on students' badges and in the criteria fields below — rename them to fit ${progInfo.name === "A-Level" ? "your mark scheme" : "your assessment language"}.</p>
+      <div class="row">
+        <div>
+          <label>Tier 1 (lowest)</label>
+          <input type="text" class="band-label-field" data-field="pass" value="${escapeHtml(bandLabels.pass)}">
+        </div>
+        <div>
+          <label>Tier 2</label>
+          <input type="text" class="band-label-field" data-field="merit" value="${escapeHtml(bandLabels.merit)}">
+        </div>
+        <div>
+          <label>Tier 3 (highest)</label>
+          <input type="text" class="band-label-field" data-field="distinction" value="${escapeHtml(bandLabels.distinction)}">
+        </div>
+      </div>
+      <button class="btn secondary" id="save-band-labels-btn">Save labels</button>
     </div>`;
 
     // Assignment brief
     html += `<div class="card">
       <h2>Assignment brief</h2>
-      <p class="hint">Paste the brief text, or upload the brief file, then extract the learning outcomes and Pass / Merit / Distinction criteria.</p>
+      <p class="hint">Paste the brief text, or upload the brief file, then extract the learning outcomes and ${bandLabels.pass} / ${bandLabels.merit} / ${bandLabels.distinction} criteria.</p>
       <label>Brief text</label>
       <textarea id="brief-text" placeholder="Paste the assignment brief here...">${escapeHtml(unit.assignmentBrief || "")}</textarea>
       <label class="file-btn">Upload brief (.pdf, .pptx, or .docx)
@@ -516,7 +657,7 @@ const db = getFirestore(fbApp);
     html += `<div class="card">
       <h2>Learning outcomes</h2>
       <p class="hint">Review and edit what was extracted — each daily session's questions below will be auto-tagged against these.</p>
-      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
+      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i,bandLabels)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
       <button class="btn secondary" id="add-lo-btn">+ Add learning outcome manually</button>
     </div>`;
 
@@ -576,7 +717,8 @@ const db = getFirestore(fbApp);
     return html;
   }
 
-  function loEditHtml(lo, i){
+  function loEditHtml(lo, i, bandLabels){
+    const L = bandLabels || { pass: "Pass", merit: "Merit", distinction: "Distinction" };
     return `<div class="lo-item" data-lo-id="${lo.id}">
       <div class="row">
         <div style="flex:0 0 90px;min-width:90px;">
@@ -592,15 +734,15 @@ const db = getFirestore(fbApp);
       <textarea class="lo-field" data-field="description" style="min-height:50px;">${escapeHtml(lo.description||'')}</textarea>
       <div class="criteria-row">
         <div class="criteria-col">
-          <b>Pass criteria</b>
+          <b>${escapeHtml(L.pass)} criteria</b>
           <textarea class="lo-field" data-field="pass" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.pass)||'')}</textarea>
         </div>
         <div class="criteria-col">
-          <b>Merit criteria</b>
+          <b>${escapeHtml(L.merit)} criteria</b>
           <textarea class="lo-field" data-field="merit" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.merit)||'')}</textarea>
         </div>
         <div class="criteria-col">
-          <b>Distinction criteria</b>
+          <b>${escapeHtml(L.distinction)} criteria</b>
           <textarea class="lo-field" data-field="distinction" style="min-height:60px;font-size:12px;">${escapeHtml((lo.criteria&&lo.criteria.distinction)||'')}</textarea>
         </div>
       </div>
@@ -654,7 +796,7 @@ const db = getFirestore(fbApp);
       const loBadges = (unit.los||[]).map(lo=>{
         const bands = byLo[lo.id];
         const band = bands && bands.length ? overallBandFrom(bands) : "unattempted";
-        return `<span style="margin-right:8px;">${escapeHtml(lo.code)} ${bandStamp(band)}</span>`;
+        return `<span style="margin-right:8px;">${escapeHtml(lo.code)} ${bandStamp(band, false, unit.bandLabels)}</span>`;
       }).join("");
       const expanded = !!state.progressExpanded[s.studentId];
       const sortedAnswers = answers.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||""));
@@ -672,7 +814,7 @@ const db = getFirestore(fbApp);
             <div class="q-text" style="font-size:14px;">${escapeHtml(a.question||'')}</div>
             <div class="small-note"><b>Answer:</b> ${escapeHtml(a.answer||'')}</div>
             <div class="feedback-box">
-              <div class="band-line">${bandStamp(a.band)}</div>
+              <div class="band-line">${bandStamp(a.band, false, unit.bandLabels)}</div>
               <div>${escapeHtml(a.feedback||'')}</div>
             </div>
           </div>`).join("")}
@@ -728,7 +870,7 @@ const db = getFirestore(fbApp);
               <span class="lo-code">${escapeHtml(lo.code||'')}</span>
               <div class="lo-title">${escapeHtml(lo.title||'')}</div>
             </div>
-            ${bandStamp(band)}
+            ${bandStamp(band, false, unit.bandLabels)}
           </div>
         </div>`;
       });
@@ -780,7 +922,7 @@ const db = getFirestore(fbApp);
         <textarea class="answer-box" data-qid="${q.id}" placeholder="Write your response here...">${escapeHtml(state.answers[q.id]||"")}</textarea>
         <button class="btn secondary check-answer-btn" data-qid="${q.id}">${fb ? "Check again" : "Check this answer"}</button>
         ${fb ? `<div class="feedback-box">
-          <div class="band-line">${bandStamp(fb.band, true)}</div>
+          <div class="band-line">${bandStamp(fb.band, true, unit.bandLabels)}</div>
           <div>${escapeHtml(fb.feedback)}</div>
         </div>` : ""}
       </div>`;
@@ -804,6 +946,27 @@ const db = getFirestore(fbApp);
           return; // shouldn't happen, button only renders when unlocked
         }
         state.mode = target;
+        render();
+      };
+    });
+
+    app.querySelectorAll("[data-programme]").forEach(btn=>{
+      btn.onclick = async () => {
+        state.programme = btn.dataset.programme;
+        state.currentUnitId = null; state.currentUnit = null;
+        state.studentUnitId = null; state.studentUnit = null;
+        state.studentSessionId = null; state.progressView = null;
+        state.currentVocabListId = null; state.currentVocabList = null;
+        state.studentVocabListId = null; state.studentVocabList = null;
+        state.quiz = null;
+        state.loading = "Loading...";
+        render();
+        if(state.programme === "vocab"){
+          await loadVocabListsIndex();
+        } else {
+          await loadUnitsIndex();
+        }
+        state.loading = null;
         render();
       };
     });
@@ -832,6 +995,15 @@ const db = getFirestore(fbApp);
         showToast("Incorrect passcode.");
       }
     };
+
+    if(state.programme === "vocab"){
+      if(state.mode === "instructor"){
+        attachInstructorVocabHandlers();
+      } else {
+        attachStudentVocabHandlers();
+      }
+      return;
+    }
 
     if(state.mode === "instructor"){
       attachInstructorHandlers();
@@ -891,7 +1063,8 @@ const db = getFirestore(fbApp);
     const newUnitBtn = document.getElementById("new-unit-btn");
     if(newUnitBtn) newUnitBtn.onclick = async () => {
       const id = uid("unit");
-      const unit = { id, name: "Untitled unit", assignmentBrief:"", los:[], sessions:[] };
+      const progInfo = PROGRAMME_LABELS[state.programme] || PROGRAMME_LABELS.hnd;
+      const unit = { id, name: "Untitled " + progInfo.unitWord.toLowerCase(), programme: state.programme, assignmentBrief:"", los:[], sessions:[], bandLabels: {...progInfo.defaultBands} };
       await saveUnit(unit);
       state.unitsIndex.push({id, name: unit.name});
       state.currentUnitId = id;
@@ -909,6 +1082,20 @@ const db = getFirestore(fbApp);
       const idx = state.unitsIndex.find(u=>u.id===state.currentUnit.id);
       if(idx) idx.name = state.currentUnit.name;
       showToast("Unit name saved.");
+      render();
+    };
+
+    const saveBandLabelsBtn = document.getElementById("save-band-labels-btn");
+    if(saveBandLabelsBtn) saveBandLabelsBtn.onclick = async () => {
+      const labels = { pass:"", merit:"", distinction:"" };
+      app.querySelectorAll(".band-label-field").forEach(f=>{ labels[f.dataset.field] = f.value.trim() || labels[f.dataset.field]; });
+      state.currentUnit.bandLabels = {
+        pass: labels.pass || "Pass",
+        merit: labels.merit || "Merit",
+        distinction: labels.distinction || "Distinction"
+      };
+      await saveUnit(state.currentUnit);
+      showToast("Standing band labels saved.");
       render();
     };
 
@@ -1234,6 +1421,331 @@ const db = getFirestore(fbApp);
         }
       };
     });
+  }
+
+  // ===================== VOCABULARY MODULE =====================
+  function instructorVocabHtml(){
+    let html = centreSettingsHtml();
+    html += `<div class="card">
+      <h2>Word lists</h2>
+      <p class="hint">Build vocabulary lists your students can practice interactively, or download as a randomised Word test with a separate answer sheet.</p>
+      <div class="unit-select-row">
+        <select id="vocab-list-select">
+          <option value="">— Select a list —</option>
+          ${state.vocabListsIndex.map(l=>`<option value="${l.id}" ${state.currentVocabListId===l.id?'selected':''}>${escapeHtml(l.name)}</option>`).join("")}
+        </select>
+        <button class="btn secondary" id="new-vocab-list-btn">+ New list</button>
+      </div>
+    </div>`;
+    if(state.currentVocabList){
+      html += vocabListWorkspaceHtml(state.currentVocabList);
+    }
+    return html;
+  }
+
+  function vocabListWorkspaceHtml(list){
+    const words = list.words || [];
+    let html = `<div class="card">
+      <label>List name</label>
+      <input type="text" id="vocab-list-name" value="${escapeHtml(list.name)}" placeholder="e.g. IELTS Reading Unit 4">
+      <div class="row">
+        <button class="btn secondary" id="save-vocab-list-name-btn">Save name</button>
+        <button class="btn danger" id="delete-vocab-list-btn">Delete list</button>
+      </div>
+    </div>`;
+
+    html += `<div class="card">
+      <h2>Add words</h2>
+      <p class="hint">Paste one word per line, as <code>word - meaning</code> (a dash, colon, equals sign, or tab also work as the separator).</p>
+      <textarea id="vocab-paste" placeholder="ubiquitous - 어디에나 있는&#10;meticulous - 꼼꼼한"></textarea>
+      <label class="file-btn">Upload a word list (.pdf, .pptx, or .docx)
+        <input type="file" id="vocab-file" accept=".pdf,.pptx,.docx">
+      </label>
+      <div class="file-meta" id="vocab-file-meta"></div>
+      <button class="btn" id="add-words-btn">+ Add these words</button>
+    </div>`;
+
+    html += `<div class="card">
+      <h2>Current words (${words.length})</h2>
+      ${words.length ? words.map(w=>`<div class="word-row" data-word-id="${w.id}">
+        <div class="w">${escapeHtml(w.word)}</div>
+        <div class="m">${escapeHtml(w.meaning)}</div>
+        <button class="btn danger delete-word-btn" data-word-id="${w.id}" style="margin:0;padding:6px 10px;">Delete</button>
+      </div>`).join("") : `<p class="small-note">No words added yet.</p>`}
+    </div>`;
+
+    html += `<div class="card">
+      <h2>Export Word doc test</h2>
+      <p class="hint">Generates a randomised test (blank space for the meaning) plus a separate Korean-meaning-only answer sheet — same format you've used before, just auto-built from this list.</p>
+      <label>Number of items (up to 100, defaults to the whole list)</label>
+      <input type="text" id="vocab-export-count" value="${Math.min(words.length,100)}">
+      <button class="btn" id="export-vocab-docx-btn">Download test + answer sheet</button>
+    </div>`;
+
+    return html;
+  }
+
+  function attachInstructorVocabHandlers(){
+    const sel = document.getElementById("vocab-list-select");
+    if(sel) sel.onchange = async (e) => {
+      const id = e.target.value;
+      if(!id){ state.currentVocabListId=null; state.currentVocabList=null; render(); return; }
+      state.currentVocabListId = id;
+      state.loading = "Loading list...";
+      render();
+      state.currentVocabList = await loadVocabList(id);
+      state.loading = null;
+      render();
+    };
+
+    const newBtn = document.getElementById("new-vocab-list-btn");
+    if(newBtn) newBtn.onclick = async () => {
+      const id = uid("vocab");
+      const list = { id, name: "Untitled list", words: [] };
+      await saveVocabList(list);
+      state.vocabListsIndex.push({id, name:list.name});
+      state.currentVocabListId = id;
+      state.currentVocabList = list;
+      render();
+    };
+
+    const nameInput = document.getElementById("vocab-list-name");
+    const saveNameBtn = document.getElementById("save-vocab-list-name-btn");
+    if(saveNameBtn) saveNameBtn.onclick = async () => {
+      state.currentVocabList.name = nameInput.value.trim() || "Untitled list";
+      await saveVocabList(state.currentVocabList);
+      const idx = state.vocabListsIndex.find(l=>l.id===state.currentVocabList.id);
+      if(idx) idx.name = state.currentVocabList.name;
+      showToast("List name saved.");
+      render();
+    };
+
+    const deleteBtn = document.getElementById("delete-vocab-list-btn");
+    if(deleteBtn) deleteBtn.onclick = async () => {
+      if(!confirm("Delete this word list? This cannot be undone.")) return;
+      state.vocabListsIndex = state.vocabListsIndex.filter(l=>l.id!==state.currentVocabList.id);
+      try{ await deleteVocabListDoc(state.currentVocabList.id); }catch(e){}
+      state.currentVocabListId = null; state.currentVocabList = null;
+      showToast("List deleted.");
+      render();
+    };
+
+    const vocabFile = document.getElementById("vocab-file");
+    if(vocabFile) vocabFile.onchange = async () => {
+      const f = vocabFile.files[0]; if(!f) return;
+      document.getElementById("vocab-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("vocab-paste").value = text;
+        document.getElementById("vocab-file-meta").textContent = "Extracted text from " + f.name + " — review the formatting below before adding.";
+      }catch(err){
+        document.getElementById("vocab-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const addWordsBtn = document.getElementById("add-words-btn");
+    if(addWordsBtn) addWordsBtn.onclick = async () => {
+      const raw = document.getElementById("vocab-paste").value;
+      const lines = raw.split("\n").map(l=>l.trim()).filter(Boolean);
+      const newWords = [];
+      lines.forEach(line=>{
+        const parts = line.split(/\s*[-–—:=\t]\s*/);
+        if(parts.length>=2){
+          const word = parts[0].trim();
+          const meaning = parts.slice(1).join(" - ").trim();
+          if(word && meaning) newWords.push({id: uid("w"), word, meaning});
+        }
+      });
+      if(!newWords.length){
+        showToast("Couldn't find any 'word - meaning' pairs. Check the format and try again.");
+        return;
+      }
+      state.currentVocabList.words = (state.currentVocabList.words||[]).concat(newWords);
+      await saveVocabList(state.currentVocabList);
+      showToast(newWords.length + " word(s) added.");
+      render();
+    };
+
+    app.querySelectorAll(".delete-word-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const wid = btn.dataset.wordId;
+        state.currentVocabList.words = state.currentVocabList.words.filter(w=>w.id!==wid);
+        await saveVocabList(state.currentVocabList);
+        render();
+      };
+    });
+
+    const exportBtn = document.getElementById("export-vocab-docx-btn");
+    if(exportBtn) exportBtn.onclick = async () => {
+      const words = state.currentVocabList.words || [];
+      if(!words.length){ showToast("Add some words first."); return; }
+      let count = parseInt(document.getElementById("vocab-export-count").value, 10);
+      if(!count || count<1) count = words.length;
+      count = Math.min(count, words.length, 100);
+      exportBtn.disabled = true;
+      exportBtn.innerHTML = '<span class="spinner"></span>Generating...';
+      try{
+        const chosen = shuffleArray(words).slice(0, count);
+        const listName = state.currentVocabList.name || "Vocabulary";
+        const safeName = listName.replace(/[^a-z0-9]+/gi,"_");
+
+        const testParas = [
+          docxParagraph(listName + " — Vocabulary Test", {bold:true, size:32, spaceAfter:240}),
+          docxParagraph("Name: ______________________     Date: ______________________", {spaceAfter:360})
+        ];
+        chosen.forEach((w,i)=>{
+          testParas.push(docxParagraph((i+1) + ". " + w.word + "   —   ______________________________", {spaceAfter:200}));
+        });
+        await buildAndDownloadDocx(safeName + "_test.docx", testParas);
+
+        const answerParas = [
+          docxParagraph(listName + " — Answer Sheet", {bold:true, size:32, spaceAfter:240})
+        ];
+        chosen.forEach((w,i)=>{
+          answerParas.push(docxParagraph((i+1) + ". " + w.word + " — " + w.meaning, {spaceAfter:200}));
+        });
+        await buildAndDownloadDocx(safeName + "_answers.docx", answerParas);
+
+        showToast("Downloaded the test and answer sheet.");
+      }catch(err){
+        showToast("Export failed: " + err.message);
+      }
+      exportBtn.disabled = false;
+      exportBtn.textContent = "Download test + answer sheet";
+    };
+  }
+
+  function studentVocabHtml(){
+    let html = `<div class="card">
+      <h2>Choose a word list</h2>
+      <div class="unit-select-row">
+        <select id="student-vocab-select">
+          <option value="">— Select a list —</option>
+          ${state.vocabListsIndex.map(l=>`<option value="${l.id}" ${state.studentVocabListId===l.id?'selected':''}>${escapeHtml(l.name)}</option>`).join("")}
+        </select>
+      </div>
+    </div>`;
+
+    if(!state.vocabListsIndex.length){
+      html += `<div class="empty"><div class="big">No word lists published yet</div>Ask your tutor to add one.</div>`;
+      return html;
+    }
+    if(!state.studentVocabList) return html;
+
+    if(state.quiz){
+      html += quizHtml();
+    } else {
+      const words = state.studentVocabList.words || [];
+      html += `<div class="card">
+        <h2>${escapeHtml(state.studentVocabList.name)}</h2>
+        <p class="hint">${words.length} word(s) available.</p>
+        <label>Number of questions</label>
+        <input type="text" id="quiz-count-input" value="${Math.min(10, words.length)}">
+        <button class="btn" id="start-quiz-btn">Start quiz</button>
+      </div>`;
+    }
+    return html;
+  }
+
+  function quizHtml(){
+    const quiz = state.quiz;
+    let html = `<div class="card"><h2>Vocabulary quiz</h2>`;
+    quiz.items.forEach((item,i)=>{
+      const chosen = quiz.answers[item.qid];
+      html += `<div class="q-block"><div class="q-number">Word ${i+1}</div><div class="q-text">${escapeHtml(item.word)}</div>`;
+      item.options.forEach((opt, oi)=>{
+        let cls = "quiz-option";
+        if(quiz.submitted){
+          if(opt===item.correctMeaning) cls+=" correct";
+          else if(opt===chosen) cls+=" incorrect";
+        } else if(chosen===opt){
+          cls+=" selected";
+        }
+        html += `<button type="button" class="${cls} quiz-opt-btn" data-qid="${item.qid}" data-opt-idx="${oi}" ${quiz.submitted?'disabled':''}>${escapeHtml(opt)}</button>`;
+      });
+      html += `</div>`;
+    });
+    if(!quiz.submitted){
+      html += `<button class="btn" id="submit-quiz-btn">Submit quiz</button>`;
+    } else {
+      html += `<div class="feedback-box" style="margin-top:16px;"><div class="band-line"><b style="font-family:var(--mono);font-size:11px;text-transform:uppercase;">Score:</b> ${quiz.score.correct} / ${quiz.score.total}</div></div>
+      <button class="btn secondary" id="retake-quiz-btn">Retake with new questions</button>`;
+    }
+    html += `<button class="link-btn" id="back-to-vocab-list-btn" style="display:block;margin-top:12px;">&larr; Back</button></div>`;
+    return html;
+  }
+
+  function generateQuiz(list, count){
+    const words = list.words || [];
+    const chosen = shuffleArray(words).slice(0, Math.min(count, words.length));
+    const items = chosen.map(w => {
+      const distractorPool = words.filter(x=>x.id!==w.id);
+      const distractors = shuffleArray(distractorPool).slice(0, Math.min(3, distractorPool.length)).map(x=>x.meaning);
+      const options = shuffleArray([w.meaning, ...distractors]);
+      return { qid: uid("vq"), word: w.word, correctMeaning: w.meaning, options };
+    });
+    return { items, answers: {}, submitted:false, score:null };
+  }
+
+  function attachStudentVocabHandlers(){
+    const sel = document.getElementById("student-vocab-select");
+    if(sel) sel.onchange = async (e) => {
+      const id = e.target.value;
+      state.quiz = null;
+      if(!id){ state.studentVocabListId=null; state.studentVocabList=null; render(); return; }
+      state.studentVocabListId = id;
+      state.loading = "Loading...";
+      render();
+      state.studentVocabList = await loadVocabList(id);
+      state.loading = null;
+      render();
+    };
+
+    const startBtn = document.getElementById("start-quiz-btn");
+    if(startBtn) startBtn.onclick = () => {
+      const words = state.studentVocabList.words || [];
+      if(words.length < 2){ showToast("This list needs at least 2 words to quiz on."); return; }
+      let count = parseInt(document.getElementById("quiz-count-input").value, 10);
+      if(!count || count<1) count = Math.min(10, words.length);
+      state.quiz = generateQuiz(state.studentVocabList, count);
+      render();
+    };
+
+    app.querySelectorAll(".quiz-opt-btn").forEach(btn=>{
+      btn.onclick = () => {
+        if(state.quiz.submitted) return;
+        const qid = btn.dataset.qid;
+        const optIdx = btn.dataset.optIdx;
+        const item = state.quiz.items.find(it=>it.qid===qid);
+        state.quiz.answers[qid] = item.options[optIdx];
+        render();
+      };
+    });
+
+    const submitQuizBtn = document.getElementById("submit-quiz-btn");
+    if(submitQuizBtn) submitQuizBtn.onclick = () => {
+      const quiz = state.quiz;
+      const unanswered = quiz.items.filter(it=>!quiz.answers[it.qid]);
+      if(unanswered.length){ showToast("Answer every question before submitting."); return; }
+      let correct = 0;
+      quiz.items.forEach(it=>{ if(quiz.answers[it.qid]===it.correctMeaning) correct++; });
+      quiz.submitted = true;
+      quiz.score = { correct, total: quiz.items.length };
+      render();
+    };
+
+    const retakeBtn = document.getElementById("retake-quiz-btn");
+    if(retakeBtn) retakeBtn.onclick = () => {
+      const count = state.quiz.items.length;
+      state.quiz = generateQuiz(state.studentVocabList, count);
+      render();
+    };
+
+    const backBtn = document.getElementById("back-to-vocab-list-btn");
+    if(backBtn) backBtn.onclick = () => {
+      state.quiz = null;
+      render();
+    };
   }
 
   // ---------- Init ----------
