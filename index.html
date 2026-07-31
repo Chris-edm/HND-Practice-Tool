@@ -254,6 +254,9 @@ const db = getFirestore(fbApp);
     studentVocabList: null,
     quiz: null, // { items: [{word, meaning, options}], answers: {idx: chosen}, score: null }
     vocabPreview: null, // array of {id, word, meaning} awaiting confirmation before saving
+    studentVocabResults: null, // { studentId, unitId(=listId), attempts:[...], wordStats:{...} } for current student+list
+    vocabProgressView: null, // { students: [...] } for instructor's vocab Student Progress panel
+    vocabProgressExpanded: {}, // studentId -> bool
   };
 
   const PROGRAMME_LABELS = {
@@ -688,8 +691,42 @@ const db = getFirestore(fbApp);
     const isMarksStyle = unit.programme === "alevel";
     if(isMarksStyle){
       html += `<div class="card">
-        <h2>Mark scheme guidance</h2>
-        <p class="hint">Optional general notes on how you want marks awarded for this subject (e.g. AO weighting, how levels-of-response should be applied). This guides the AI when it writes each question's specific mark scheme — it doesn't need to be exhaustive.</p>
+        <h2>Reference documents</h2>
+        <p class="hint">Upload the IAL specification, the official mark scheme, and examiner report(s) for this subject. Once these are here, you don't need to write marking guidance or build topics by hand — the AI reads these directly and grounds its questions, mark schemes, and feedback comments in them. Anything you upload here is optional individually, but the more you provide, the less manual setup you need below.</p>
+
+        <label>IAL specification</label>
+        <textarea id="spec-text" style="min-height:80px;" placeholder="Paste the specification text here, or upload a file below...">${escapeHtml(unit.specificationText || "")}</textarea>
+        <label class="file-btn">Upload specification (.pdf, .pptx, or .docx)
+          <input type="file" id="spec-file" accept=".pdf,.pptx,.docx">
+        </label>
+        <div class="file-meta" id="spec-file-meta"></div>
+
+        <label style="margin-top:14px;">Official mark scheme</label>
+        <textarea id="markscheme-text" style="min-height:80px;" placeholder="Paste the mark scheme text here, or upload a file below...">${escapeHtml(unit.markSchemeDocText || "")}</textarea>
+        <label class="file-btn">Upload mark scheme (.pdf, .pptx, or .docx)
+          <input type="file" id="markscheme-file" accept=".pdf,.pptx,.docx">
+        </label>
+        <div class="file-meta" id="markscheme-file-meta"></div>
+
+        <label style="margin-top:14px;">Examiner report(s)</label>
+        <textarea id="examinerreport-text" style="min-height:80px;" placeholder="Paste examiner report text here, or upload a file below. Uploading another report file appends to what's already here, so you can build up several series over time.">${escapeHtml(unit.examinerReportText || "")}</textarea>
+        <label class="file-btn">Upload examiner report (.pdf, .pptx, or .docx) — adds to the text above
+          <input type="file" id="examinerreport-file" accept=".pdf,.pptx,.docx">
+        </label>
+        <div class="file-meta" id="examinerreport-file-meta"></div>
+
+        <div class="row" style="margin-top:14px;">
+          <button class="btn secondary" id="save-reference-docs-btn">Save reference documents</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button class="btn" id="auto-build-topics-btn">Auto-build topics &amp; marking guidance from documents</button>
+        </div>
+        <p class="small-note" style="margin-top:8px;">This reads whatever you've saved above (specification preferred, mark scheme and examiner report as extra context) and writes the topic list and marking guidance below for you — review and tweak afterwards if you like.</p>
+      </div>`;
+
+      html += `<div class="card">
+        <h2>Mark scheme guidance <span class="small-note">(optional — auto-fills above)</span></h2>
+        <p class="hint">General notes on how you want marks awarded for this subject (e.g. AO weighting, how levels-of-response should be applied). This guides the AI when it writes each question's specific mark scheme. If you've uploaded reference documents above, this can be left blank — the AI will draw on those directly.</p>
         <textarea id="mark-scheme-guidance" placeholder="e.g. Follow Pearson Edexcel levels-of-response conventions: low-tariff questions (2-4 marks) reward accurate knowledge/application; high-tariff questions (8-25 marks) use levels of response rewarding depth of analysis and evaluation.">${escapeHtml(unit.markSchemeGuidance || "")}</textarea>
         <button class="btn secondary" id="save-mark-scheme-guidance-btn">Save guidance</button>
       </div>`;
@@ -732,10 +769,12 @@ const db = getFirestore(fbApp);
 
     // LOs
     html += `<div class="card">
-      <h2>Learning outcomes</h2>
-      <p class="hint">Review and edit what was extracted — each daily session's questions below will be auto-tagged against these.</p>
-      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i,bandLabels,isMarksStyle)).join("") || `<p class="small-note">No learning outcomes yet. Extract them from the brief above, or add one manually.</p>`}</div>
-      <button class="btn secondary" id="add-lo-btn">+ Add learning outcome manually</button>
+      <h2>${isMarksStyle ? "Topics" : "Learning outcomes"}</h2>
+      <p class="hint">${isMarksStyle
+        ? "Review and edit what was auto-built from your reference documents (or the brief) — each daily session's questions below will be auto-tagged against these. Not strictly required before generating questions, but tagging progress by topic needs at least one."
+        : "Review and edit what was extracted — each daily session's questions below will be auto-tagged against these."}</p>
+      <div id="lo-editor">${(unit.los||[]).map((lo,i)=>loEditHtml(lo,i,bandLabels,isMarksStyle)).join("") || `<p class="small-note">No ${isMarksStyle ? "topics" : "learning outcomes"} yet. ${isMarksStyle ? "Use the auto-build button above, extract them from the brief" : "Extract them from the brief above"}, or add one manually.</p>`}</div>
+      <button class="btn secondary" id="add-lo-btn">+ Add ${isMarksStyle ? "topic" : "learning outcome"} manually</button>
     </div>`;
 
     // Sessions (dated lecture/tutorial content -> daily questions)
@@ -1051,6 +1090,7 @@ const db = getFirestore(fbApp);
         state.currentVocabListId = null; state.currentVocabList = null;
         state.studentVocabListId = null; state.studentVocabList = null;
         state.quiz = null;
+        state.studentVocabResults = null; state.vocabProgressView = null; state.vocabProgressExpanded = {};
         state.loading = "Loading...";
         render();
         if(state.programme === "vocab"){
@@ -1156,7 +1196,7 @@ const db = getFirestore(fbApp);
     if(newUnitBtn) newUnitBtn.onclick = async () => {
       const id = uid("unit");
       const progInfo = PROGRAMME_LABELS[state.programme] || PROGRAMME_LABELS.hnd;
-      const unit = { id, name: "Untitled " + progInfo.unitWord.toLowerCase(), programme: state.programme, assignmentBrief:"", los:[], sessions:[], bandLabels: {...progInfo.defaultBands} };
+      const unit = { id, name: "Untitled " + progInfo.unitWord.toLowerCase(), programme: state.programme, assignmentBrief:"", los:[], sessions:[], bandLabels: {...progInfo.defaultBands}, markSchemeGuidance:"", specificationText:"", markSchemeDocText:"", examinerReportText:"" };
       await saveUnit(unit);
       state.unitsIndex.push({id, name: unit.name});
       state.currentUnitId = id;
@@ -1218,6 +1258,97 @@ const db = getFirestore(fbApp);
         document.getElementById("brief-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
       }catch(err){
         document.getElementById("brief-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const specFile = document.getElementById("spec-file");
+    if(specFile) specFile.onchange = async () => {
+      const f = specFile.files[0]; if(!f) return;
+      document.getElementById("spec-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("spec-text").value = text;
+        document.getElementById("spec-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+      }catch(err){
+        document.getElementById("spec-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const markschemeFile = document.getElementById("markscheme-file");
+    if(markschemeFile) markschemeFile.onchange = async () => {
+      const f = markschemeFile.files[0]; if(!f) return;
+      document.getElementById("markscheme-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("markscheme-text").value = text;
+        document.getElementById("markscheme-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + ".";
+      }catch(err){
+        document.getElementById("markscheme-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const examinerReportFile = document.getElementById("examinerreport-file");
+    if(examinerReportFile) examinerReportFile.onchange = async () => {
+      const f = examinerReportFile.files[0]; if(!f) return;
+      document.getElementById("examinerreport-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        const area = document.getElementById("examinerreport-text");
+        area.value = (area.value ? area.value + "\n\n----- " + f.name + " -----\n\n" : "") + text;
+        document.getElementById("examinerreport-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words from " + f.name + " and appended below.";
+      }catch(err){
+        document.getElementById("examinerreport-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const saveRefDocsBtn = document.getElementById("save-reference-docs-btn");
+    if(saveRefDocsBtn) saveRefDocsBtn.onclick = async () => {
+      state.currentUnit.specificationText = document.getElementById("spec-text").value;
+      state.currentUnit.markSchemeDocText = document.getElementById("markscheme-text").value;
+      state.currentUnit.examinerReportText = document.getElementById("examinerreport-text").value;
+      await saveUnit(state.currentUnit);
+      showToast("Reference documents saved.");
+    };
+
+    const autoBuildBtn = document.getElementById("auto-build-topics-btn");
+    if(autoBuildBtn) autoBuildBtn.onclick = async () => {
+      const specText = document.getElementById("spec-text").value.trim();
+      const markSchemeDocText = document.getElementById("markscheme-text").value.trim();
+      const examinerReportText = document.getElementById("examinerreport-text").value.trim();
+      const briefText = document.getElementById("brief-text").value.trim();
+      if(!specText && !markSchemeDocText && !examinerReportText && !briefText){
+        showToast("Upload or paste at least one reference document (or the brief) first.");
+        return;
+      }
+      autoBuildBtn.disabled = true;
+      autoBuildBtn.innerHTML = '<span class="spinner"></span>Building...';
+      try{
+        const sys = "You are assisting a Pearson Edexcel International A-Level (IAL) tutor. From the provided specification, official mark scheme, and/or examiner report excerpts, produce: (1) a concise list of the subject's topics (as they'd be taught session-by-session), each with a short title, 1-2 sentence description, and mark-scheme notes summarising typical tariffs, AO weighting, and common pitfalls the examiner reports mention for that topic; (2) a short general marking-guidance paragraph covering overall AO weighting and levels-of-response conventions for this subject as a whole. Base everything strictly on what's provided — do not invent specification content that isn't there. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"markSchemeGuidance\": \"...\", \"topics\": [{\"code\": \"T1\", \"title\": \"short title\", \"description\": \"...\", \"markSchemeNotes\": \"...\"}]}.";
+        const userMsg = "Specification excerpt:\n" + capText(specText, 8000) +
+          "\n\nOfficial mark scheme excerpt:\n" + capText(markSchemeDocText, 6000) +
+          "\n\nExaminer report excerpt(s):\n" + capText(examinerReportText, 6000) +
+          "\n\nAssignment/brief text (if any, for extra context):\n" + capText(briefText, 3000);
+        const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
+        const los = (result.topics || []).map(t => ({
+          id: uid("lo"),
+          code: t.code || "",
+          title: t.title || "",
+          description: t.description || "",
+          markSchemeNotes: t.markSchemeNotes || "",
+          criteria: { pass:"", merit:"", distinction:"" }
+        }));
+        state.currentUnit.specificationText = specText;
+        state.currentUnit.markSchemeDocText = markSchemeDocText;
+        state.currentUnit.examinerReportText = examinerReportText;
+        if(los.length) state.currentUnit.los = los;
+        if(result.markSchemeGuidance) state.currentUnit.markSchemeGuidance = result.markSchemeGuidance;
+        await saveUnit(state.currentUnit);
+        showToast("Topics and marking guidance built — review below.");
+        render();
+      }catch(err){
+        showToast("Auto-build failed: " + err.message);
+        autoBuildBtn.disabled = false;
+        autoBuildBtn.textContent = "Auto-build topics & marking guidance from documents";
       }
     };
 
@@ -1364,9 +1495,12 @@ const db = getFirestore(fbApp);
           if(isMarksStyle){
             const loListText = unit.los.map(lo=>lo.code + " — " + lo.title + ": " + lo.description +
               (lo.markSchemeNotes ? " | Mark scheme notes: " + lo.markSchemeNotes : "")).join("\n");
-            sys = "You write exam-style practice questions for A-Level students, following Pearson (Edexcel) conventions, based strictly on what was covered in a single day's lecture/tutorial session. Rules: (1) Base every question ONLY on the provided session content. (2) For EACH question, pick the single topic (from the list provided) it best fits, and assign a realistic Pearson-style mark tariff (vary these across the set — e.g. a 2-4 mark AO1/recall-and-apply question and, where the content supports it, a higher-tariff 6-12 mark question requiring analysis/evaluation with a levels-of-response mark scheme). (3) Write a specific mark scheme for each question as short numbered levels scaled to its own max marks (e.g. for an 8-mark question: 'Level 1 (1-2 marks): ...; Level 2 (3-5 marks): ...; Level 3 (6-8 marks): ...'). (4) Provide brief model-answer bullet points referencing only the given content. Generate 1 to 2 questions only — this is a short daily practice, not a full test. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"loCode\": \"LO1\", \"maxMarks\": 8, \"markScheme\": \"Level 1 (1-2 marks): ...\\nLevel 2 (3-5 marks): ...\\nLevel 3 (6-8 marks): ...\", \"modelAnswerPoints\": [\"...\"]}]}.";
+            sys = "You write exam-style practice questions for A-Level students, following Pearson (Edexcel) conventions, based strictly on what was covered in a single day's lecture/tutorial session. Rules: (1) Base every question ONLY on the provided session content. (2) For EACH question, pick the single topic (from the list provided) it best fits, and assign a realistic Pearson-style mark tariff (vary these across the set — e.g. a 2-4 mark AO1/recall-and-apply question and, where the content supports it, a higher-tariff 6-12 mark question requiring analysis/evaluation with a levels-of-response mark scheme). (3) Write a specific mark scheme for each question as short numbered levels scaled to its own max marks (e.g. for an 8-mark question: 'Level 1 (1-2 marks): ...; Level 2 (3-5 marks): ...; Level 3 (6-8 marks): ...'). If specification, official mark scheme, or examiner report excerpts are provided below, ground your tariffs, command words, and levels-of-response wording in the real conventions and terminology they use, rather than inventing your own. (4) Provide brief model-answer bullet points referencing only the given content. Generate 1 to 2 questions only — this is a short daily practice, not a full test. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"questions\": [{\"question\": \"...\", \"loCode\": \"LO1\", \"maxMarks\": 8, \"markScheme\": \"Level 1 (1-2 marks): ...\\nLevel 2 (3-5 marks): ...\\nLevel 3 (6-8 marks): ...\", \"modelAnswerPoints\": [\"...\"]}]}.";
             userMsg = "Topics for this subject:\n" + capText(loListText, 4000) +
               "\n\nGeneral mark scheme guidance for this subject:\n" + capText(unit.markSchemeGuidance, 2000) +
+              "\n\nOfficial specification excerpt:\n" + capText(unit.specificationText, 4000) +
+              "\n\nOfficial mark scheme excerpt:\n" + capText(unit.markSchemeDocText, 4000) +
+              "\n\nExaminer report excerpt(s):\n" + capText(unit.examinerReportText, 4000) +
               "\n\nAssignment/spec context:\n" + capText(unit.assignmentBrief, 3000) +
               "\n\nThis session's date: " + session.date + (session.title ? " (" + session.title + ")" : "") +
               "\n\nThis session's lecture slide content:\n" + capText(session.slidesText, 7000) +
@@ -1508,10 +1642,12 @@ const db = getFirestore(fbApp);
         try{
           let sys, userMsg;
           if(isMarksStyle){
-            sys = "You are marking a single A-Level practice answer following Pearson (Edexcel) conventions, strictly against the provided lecture/tutorial source content and this question's own mark scheme. Do not reward or expect content beyond what is in the provided source material. Award a specific whole-number mark from 0 up to the question's maximum. Give concise, constructive feedback (2-4 sentences) naming which level of the mark scheme was met and one concrete improvement. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"marksAwarded\": 6, \"feedback\": \"...\"}.";
-            userMsg = "Topic: " + (lo.code||q.loCode) + (lo.title ? " — " + lo.title : "") +
+            sys = "You are marking a single A-Level practice answer following Pearson (Edexcel) conventions, strictly against the provided lecture/tutorial source content and this question's own mark scheme. Do not reward or expect content beyond what is in the provided source material. Award a specific whole-number mark from 0 up to the question's maximum. Give concise, constructive feedback (2-4 sentences) naming which level of the mark scheme was met and one concrete improvement. If official mark scheme or examiner report excerpts are provided below, let them shape your standard of judgement and phrasing (e.g. common misconceptions examiners flag at this level, how marks are typically withheld), but never award beyond what this question's own mark scheme and max marks allow. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"marksAwarded\": 6, \"feedback\": \"...\"}.";
+            userMsg = "Topic: " + (lo.code||q.loCode) + (lo.title ? " — " + lo.title : "") + (lo.markSchemeNotes ? " | Topic mark scheme notes: " + lo.markSchemeNotes : "") +
               "\n\nSource content (slides):\n" + capText(session.slidesText, 4000) +
               "\n\nSource content (tutorial):\n" + capText(session.tutorialText, 4000) +
+              "\n\nOfficial mark scheme excerpt (general conventions for this subject):\n" + capText(unit.markSchemeDocText, 2500) +
+              "\n\nExaminer report excerpt(s) (common errors, what examiners reward):\n" + capText(unit.examinerReportText, 2500) +
               "\n\nQuestion (" + (q.maxMarks||'?') + " marks): " + q.question +
               "\nMark scheme:\n" + (q.markScheme||"") +
               "\nModel answer points: " + (q.modelAnswerPoints||[]).join("; ") +
@@ -1610,11 +1746,22 @@ const db = getFirestore(fbApp);
 
     html += `<div class="card">
       <h2>Current words (${words.length})</h2>
-      ${words.length ? words.map(w=>`<div class="word-row" data-word-id="${w.id}">
-        <div class="w">${escapeHtml(w.word)}</div>
-        <div class="m">${escapeHtml(w.meaning)}</div>
+      <p class="hint">Edit a word or meaning directly, then hit Save on that row.</p>
+      ${words.length ? words.map(w=>`<div class="word-row" data-word-id="${w.id}" style="display:flex;align-items:center;gap:8px;">
+        <input type="text" class="word-edit-field" data-word-id="${w.id}" data-field="word" value="${escapeHtml(w.word)}" style="flex:1;">
+        <input type="text" class="word-edit-field" data-word-id="${w.id}" data-field="meaning" value="${escapeHtml(w.meaning)}" style="flex:1.4;">
+        <button class="btn secondary save-word-btn" data-word-id="${w.id}" style="margin:0;padding:6px 10px;">Save</button>
         <button class="btn danger delete-word-btn" data-word-id="${w.id}" style="margin:0;padding:6px 10px;">Delete</button>
       </div>`).join("") : `<p class="small-note">No words added yet.</p>`}
+    </div>`;
+
+    html += `<div class="card">
+      <h2>Student progress</h2>
+      <p class="hint">Every student who has taken a quiz on this list, their overall accuracy, and which words are giving them the most trouble.</p>
+      <button class="btn secondary" id="load-vocab-progress-btn">${state.vocabProgressView ? "Refresh" : "Load student progress"}</button>
+      <div id="vocab-progress-list" style="margin-top:14px;">
+        ${state.vocabProgressView ? vocabStudentProgressListHtml() : ""}
+      </div>
     </div>`;
 
     html += `<div class="card">
@@ -1626,6 +1773,40 @@ const db = getFirestore(fbApp);
     </div>`;
 
     return html;
+  }
+
+  function vocabStudentProgressListHtml(){
+    const students = state.vocabProgressView.students;
+    if(!students.length) return `<p class="small-note">No student attempts recorded yet for this list.</p>`;
+    return students.map(s=>{
+      const attempts = (s.attempts || []).slice().sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+      const totalCorrect = attempts.reduce((sum,a)=>sum+(a.correct||0),0);
+      const totalQs = attempts.reduce((sum,a)=>sum+(a.total||0),0);
+      const pct = totalQs ? Math.round((totalCorrect/totalQs)*100) : 0;
+      const wordStats = Object.values(s.wordStats || {});
+      const weakest = wordStats
+        .filter(w=>w.seen>0)
+        .map(w=>({...w, acc: w.correct / w.seen}))
+        .sort((a,b)=>a.acc - b.acc)
+        .slice(0, 5);
+      const expanded = !!state.vocabProgressExpanded[s.studentId];
+      return `<div class="lo-item">
+        <div class="lo-head">
+          <div>
+            <div class="lo-title">${escapeHtml(s.studentId)}</div>
+            <div style="margin-top:6px;" class="small-note">${attempts.length} quiz(zes) &middot; ${totalCorrect} / ${totalQs} correct overall (${pct}%)</div>
+          </div>
+          <button class="btn secondary toggle-vocab-progress-btn" data-student-id="${escapeHtml(s.studentId)}">${expanded ? "Hide detail" : "View detail"}</button>
+        </div>
+        ${expanded ? `<div style="margin-top:12px;">
+          ${weakest.length ? `<div class="small-note"><b>Weakest words:</b> ${weakest.map(w=>escapeHtml(w.word)+" ("+w.correct+"/"+w.seen+")").join(", ")}</div>` : ""}
+          ${attempts.map(a=>`<div class="q-block" style="margin-top:10px;padding-top:10px;">
+            <div class="q-number">${escapeHtml((a.date||'').slice(0,10))}</div>
+            <div class="feedback-box"><div class="band-line">${a.correct} / ${a.total} correct</div></div>
+          </div>`).join("")}
+        </div>` : ""}
+      </div>`;
+    }).join("");
   }
 
   function vocabPreviewHtml(){
@@ -1649,6 +1830,7 @@ const db = getFirestore(fbApp);
     const sel = document.getElementById("vocab-list-select");
     if(sel) sel.onchange = async (e) => {
       const id = e.target.value;
+      state.vocabProgressView = null; state.vocabProgressExpanded = {};
       if(!id){ state.currentVocabListId=null; state.currentVocabList=null; render(); return; }
       state.currentVocabListId = id;
       state.loading = "Loading list...";
@@ -1753,11 +1935,45 @@ const db = getFirestore(fbApp);
       render();
     };
 
+    app.querySelectorAll(".save-word-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const wid = btn.dataset.wordId;
+        const row = app.querySelector(`.word-row[data-word-id="${wid}"]`);
+        const wordField = row.querySelector('.word-edit-field[data-field="word"]');
+        const meaningField = row.querySelector('.word-edit-field[data-field="meaning"]');
+        const newWord = wordField.value.trim();
+        const newMeaning = meaningField.value.trim();
+        if(!newWord || !newMeaning){ showToast("Word and meaning can't be empty."); return; }
+        const w = state.currentVocabList.words.find(x=>x.id===wid);
+        if(w){ w.word = newWord; w.meaning = newMeaning; }
+        await saveVocabList(state.currentVocabList);
+        showToast("Word updated.");
+        render();
+      };
+    });
+
     app.querySelectorAll(".delete-word-btn").forEach(btn=>{
       btn.onclick = async () => {
         const wid = btn.dataset.wordId;
         state.currentVocabList.words = state.currentVocabList.words.filter(w=>w.id!==wid);
         await saveVocabList(state.currentVocabList);
+        render();
+      };
+    });
+
+    const loadVocabProgressBtn = document.getElementById("load-vocab-progress-btn");
+    if(loadVocabProgressBtn) loadVocabProgressBtn.onclick = async () => {
+      loadVocabProgressBtn.disabled = true;
+      loadVocabProgressBtn.innerHTML = '<span class="spinner"></span>Loading...';
+      const students = await loadAllResultsForUnit(state.currentVocabList.id);
+      state.vocabProgressView = { students };
+      render();
+    };
+
+    app.querySelectorAll(".toggle-vocab-progress-btn").forEach(btn=>{
+      btn.onclick = () => {
+        const sid = btn.dataset.studentId;
+        state.vocabProgressExpanded[sid] = !state.vocabProgressExpanded[sid];
         render();
       };
     });
@@ -1804,8 +2020,13 @@ const db = getFirestore(fbApp);
 
   function studentVocabHtml(){
     let html = `<div class="card">
-      <h2>Choose a word list</h2>
-      <div class="unit-select-row">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <h2 style="margin:0;">Choose a word list</h2>
+        <div class="small-note">
+          ${state.studentId ? `Signed in as <b>${escapeHtml(state.studentId)}</b> &middot; <button class="link-btn" id="change-student-id-btn">not you?</button>` : ""}
+        </div>
+      </div>
+      <div class="unit-select-row" style="margin-top:12px;">
         <select id="student-vocab-select">
           <option value="">— Select a list —</option>
           ${state.vocabListsIndex.map(l=>`<option value="${l.id}" ${state.studentVocabListId===l.id?'selected':''}>${escapeHtml(l.name)}</option>`).join("")}
@@ -1823,6 +2044,17 @@ const db = getFirestore(fbApp);
       html += quizHtml();
     } else {
       const words = state.studentVocabList.words || [];
+      const attempts = (state.studentVocabResults && state.studentVocabResults.attempts) || [];
+      if(attempts.length){
+        const totalCorrect = attempts.reduce((s,a)=>s+(a.correct||0),0);
+        const totalQs = attempts.reduce((s,a)=>s+(a.total||0),0);
+        const pct = totalQs ? Math.round((totalCorrect/totalQs)*100) : 0;
+        const last = attempts[attempts.length-1];
+        html += `<div class="card">
+          <h2>Your progress on this list</h2>
+          <p class="hint">${attempts.length} quiz(zes) taken &middot; ${totalCorrect} / ${totalQs} correct overall (${pct}%). Last attempt: ${last.correct} / ${last.total}.</p>
+        </div>`;
+      }
       html += `<div class="card">
         <h2>${escapeHtml(state.studentVocabList.name)}</h2>
         <p class="hint">${words.length} word(s) available.</p>
@@ -1869,21 +2101,34 @@ const db = getFirestore(fbApp);
       const distractorPool = words.filter(x=>x.id!==w.id);
       const distractors = shuffleArray(distractorPool).slice(0, Math.min(3, distractorPool.length)).map(x=>x.meaning);
       const options = shuffleArray([w.meaning, ...distractors]);
-      return { qid: uid("vq"), word: w.word, correctMeaning: w.meaning, options };
+      return { qid: uid("vq"), wordId: w.id, word: w.word, correctMeaning: w.meaning, options };
     });
     return { items, answers: {}, submitted:false, score:null };
   }
 
   function attachStudentVocabHandlers(){
+    const changeIdBtn = document.getElementById("change-student-id-btn");
+    if(changeIdBtn) changeIdBtn.onclick = () => {
+      const entered = (prompt("Enter your name or student ID:") || "").trim();
+      if(entered){
+        state.studentId = entered;
+        localStorage.setItem("unitLedgerStudentId", entered);
+        state.studentVocabResults = null;
+        render();
+      }
+    };
+
     const sel = document.getElementById("student-vocab-select");
     if(sel) sel.onchange = async (e) => {
       const id = e.target.value;
       state.quiz = null;
+      state.studentVocabResults = null;
       if(!id){ state.studentVocabListId=null; state.studentVocabList=null; render(); return; }
       state.studentVocabListId = id;
       state.loading = "Loading...";
       render();
       state.studentVocabList = await loadVocabList(id);
+      state.studentVocabResults = await loadResultsForStudent(id);
       state.loading = null;
       render();
     };
@@ -1910,7 +2155,7 @@ const db = getFirestore(fbApp);
     });
 
     const submitQuizBtn = document.getElementById("submit-quiz-btn");
-    if(submitQuizBtn) submitQuizBtn.onclick = () => {
+    if(submitQuizBtn) submitQuizBtn.onclick = async () => {
       const quiz = state.quiz;
       const unanswered = quiz.items.filter(it=>!quiz.answers[it.qid]);
       if(unanswered.length){ showToast("Answer every question before submitting."); return; }
@@ -1919,6 +2164,38 @@ const db = getFirestore(fbApp);
       quiz.submitted = true;
       quiz.score = { correct, total: quiz.items.length };
       render();
+
+      try{
+        const listId = state.studentVocabList.id;
+        const sid = ensureStudentId();
+        if(!state.studentVocabResults) state.studentVocabResults = { studentId: sid, unitId: listId, attempts: [], wordStats: {} };
+        if(!state.studentVocabResults.attempts) state.studentVocabResults.attempts = [];
+        if(!state.studentVocabResults.wordStats) state.studentVocabResults.wordStats = {};
+        const wordResults = quiz.items.map(it => ({
+          wordId: it.wordId,
+          word: it.word,
+          correct: quiz.answers[it.qid] === it.correctMeaning
+        }));
+        state.studentVocabResults.attempts.push({
+          date: new Date().toISOString(),
+          correct,
+          total: quiz.items.length,
+          words: wordResults
+        });
+        if(state.studentVocabResults.attempts.length > 50){
+          state.studentVocabResults.attempts = state.studentVocabResults.attempts.slice(-50);
+        }
+        wordResults.forEach(wr=>{
+          const key = wr.wordId || wr.word;
+          if(!state.studentVocabResults.wordStats[key]) state.studentVocabResults.wordStats[key] = { word: wr.word, seen: 0, correct: 0 };
+          state.studentVocabResults.wordStats[key].word = wr.word;
+          state.studentVocabResults.wordStats[key].seen++;
+          if(wr.correct) state.studentVocabResults.wordStats[key].correct++;
+        });
+        await saveResultsForStudent(listId, state.studentVocabResults);
+      }catch(err){
+        showToast("Could not save your progress: " + err.message);
+      }
     };
 
     const retakeBtn = document.getElementById("retake-quiz-btn");
