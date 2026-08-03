@@ -214,7 +214,7 @@ const firebaseConfig = {
   messagingSenderId: "390917281071",
   appId: "1:390917281071:web:7dbbf7da5b0c68a935fdda"
 };
-const GROQ_API_KEY = "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";
+// Groq is called through a proxy (see AI_PROXY_URL below) — no key lives in this file anymore.
 
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
@@ -322,15 +322,17 @@ const db = getFirestore(fbApp);
     return text.slice(start); // unbalanced — let JSON.parse report the real error
   }
 
-  // ---------- Groq API helper ----------
+  // ---------- AI proxy helper ----------
+  // Requests go through a small proxy (Deno Deploy) that holds the Groq key
+  // server-side, so the key never ships in this public page's source.
+  const AI_PROXY_URL = "https://edmgc.chris-edm.deno.net";
   async function callAI(systemPrompt, userPrompt, expectJson, model){
     const resp = await fetch(
-      "https://api.groq.com/openai/v1/chat/completions",
+      AI_PROXY_URL,
       {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + GROQ_API_KEY
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           model: model || GRADING_MODEL,
