@@ -327,7 +327,7 @@ const db = getFirestore(fbApp);
   // Requests go through a small proxy (Deno Deploy) that holds the Groq key
   // server-side, so the key never ships in this public page's source.
   const AI_PROXY_URL = "https://edmgc.chris-edm.deno.net";
-  async function callAI(systemPrompt, userPrompt, expectJson, model){
+  async function callAI(systemPrompt, userPrompt, expectJson, model, maxTokens){
     const resp = await fetch(
       AI_PROXY_URL,
       {
@@ -337,7 +337,7 @@ const db = getFirestore(fbApp);
         },
         body: JSON.stringify({
           model: model || GRADING_MODEL,
-          max_completion_tokens: 2000,
+          max_completion_tokens: maxTokens || 2000,
           messages: [
             ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
             { role: "user", content: userPrompt }
@@ -1390,7 +1390,7 @@ const db = getFirestore(fbApp);
           "\n\nOfficial mark scheme excerpt:\n" + capText(markSchemeDocText, 6000) +
           "\n\nExaminer report excerpt(s):\n" + capText(examinerReportText, 6000) +
           "\n\nAssignment/brief text (if any, for extra context):\n" + capText(briefText, 3000);
-        const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
+        const result = await callAI(sys, userMsg, true, GENERATION_MODEL, 3000);
         const los = (result.topics || []).map(t => ({
           id: uid("lo"),
           code: t.code || "",
@@ -1423,7 +1423,7 @@ const db = getFirestore(fbApp);
       try{
         const sys = "You are assisting a BTEC HND Level 5 tutor. You extract structured Learning Outcomes and Pass/Merit/Distinction assessment criteria from an assignment brief. Respond ONLY with valid JSON, no preamble, no markdown fences. JSON shape: {\"los\": [{\"code\": \"LO1\", \"title\": \"short title\", \"description\": \"1-2 sentence description\", \"criteria\": {\"pass\": \"P1: ...; P2: ...\", \"merit\": \"M1: ...\", \"distinction\": \"D1: ...\"}}]}. Use the exact criterion codes and wording found in the brief where possible; if criteria are not explicit for an LO, write a brief best-effort criterion in the same style.";
         const userMsg = "Assignment brief:\n\n" + capText(briefText, 16000);
-        const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
+        const result = await callAI(sys, userMsg, true, GENERATION_MODEL, 3000);
         const los = (result.los || []).map(lo => ({
           id: uid("lo"),
           code: lo.code || "",
@@ -1626,7 +1626,7 @@ const db = getFirestore(fbApp);
               "\n\nThis session's lecture slide content:\n" + capText(session.slidesText, 7000) +
               "\n\nThis session's tutorial material:\n" + capText(session.tutorialText, 5000);
           }
-          const result = await callAI(sys, userMsg, true, GENERATION_MODEL);
+          const result = await callAI(sys, userMsg, true, GENERATION_MODEL, 5000);
           const questions = (result.questions||[]).map(q=>{
             const matchedLo = unit.los.find(lo => (lo.code||"").trim().toLowerCase() === (q.loCode||"").trim().toLowerCase()) || unit.los[0];
             const base = {
@@ -1846,6 +1846,19 @@ const db = getFirestore(fbApp);
     </div>`;
 
     html += `<div class="card">
+      <h2>Auto-extract vocabulary from learning material</h2>
+      <p class="hint">Upload a lecture slide deck, reading passage, or tutorial document and let the AI pick the vocabulary itself — both general and academic words a BTEC HND Level 5 or A-Level student should know, skipping field-specific jargon, named theories/models, and anything too basic. It also writes the Korean meaning for you. You'll get the same review-before-saving screen as manual entry, so you can fix or remove anything before it's added.</p>
+      <textarea id="vocab-source-text" style="min-height:100px;" placeholder="Paste the learning material here, or upload a file below..."></textarea>
+      <label class="file-btn">Upload material (.pdf, .pptx, or .docx)
+        <input type="file" id="vocab-source-file" accept=".pdf,.pptx,.docx">
+      </label>
+      <div class="file-meta" id="vocab-source-file-meta"></div>
+      <label>Roughly how many words to extract</label>
+      <input type="text" id="vocab-extract-count" value="20">
+      <button class="btn" id="auto-extract-vocab-btn">Extract vocabulary with AI</button>
+    </div>`;
+
+    html += `<div class="card">
       <h2>Add words</h2>
       <p class="hint">Paste your list — either one clean <code>word - meaning</code> pair per line, or a running numbered list straight from a document (number, English word, Korean meaning, next number...). Either way, you'll get a chance to review and fix the parsed list before it's saved.</p>
       <textarea id="vocab-paste" placeholder="ubiquitous - 어디에나 있는&#10;meticulous - 꼼꼼한"></textarea>
@@ -1983,6 +1996,48 @@ const db = getFirestore(fbApp);
       state.currentVocabListId = null; state.currentVocabList = null;
       showToast("List deleted.");
       render();
+    };
+
+    const vocabSourceFile = document.getElementById("vocab-source-file");
+    if(vocabSourceFile) vocabSourceFile.onchange = async () => {
+      const f = vocabSourceFile.files[0]; if(!f) return;
+      document.getElementById("vocab-source-file-meta").textContent = "Extracting text from " + f.name + "...";
+      try{
+        const text = await extractFile(f);
+        document.getElementById("vocab-source-text").value = text;
+        document.getElementById("vocab-source-file-meta").textContent = "Extracted " + text.split(/\s+/).length + " words of text from " + f.name + ".";
+      }catch(err){
+        document.getElementById("vocab-source-file-meta").textContent = "Could not read file: " + err.message;
+      }
+    };
+
+    const autoExtractVocabBtn = document.getElementById("auto-extract-vocab-btn");
+    if(autoExtractVocabBtn) autoExtractVocabBtn.onclick = async () => {
+      const sourceText = document.getElementById("vocab-source-text").value.trim();
+      if(!sourceText){ showToast("Paste or upload the learning material first."); return; }
+      const countRaw = parseInt(document.getElementById("vocab-extract-count").value, 10);
+      const count = Math.max(5, Math.min(60, isNaN(countRaw) ? 20 : countRaw));
+      autoExtractVocabBtn.disabled = true;
+      autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Extracting...';
+      try{
+        const sys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students studying in English. From the provided learning material, select vocabulary words worth testing. Selection criteria, all of which must be followed: (1) Include a mix of general vocabulary (everyday but non-basic words a strong intermediate English learner should know) and broadly ACADEMIC vocabulary (words common across academic reading/writing generally, not tied to one field). (2) EXCLUDE terms that are jargon specific to one field or topic, named theories/models/frameworks/formulas, proper nouns, brand or company names, and units/symbols. (3) EXCLUDE words so basic or common that a competent English learner at this level would already know them. (4) Only choose words that are genuinely useful and broadly transferable — not niche terminology tied only to this one document's specific subject matter. For each word chosen, give the base/dictionary form (not a random inflected form from the text) and an accurate, natural Korean meaning as it would actually be used, matching the sense the word has in this context. Select up to roughly " + count + " words — fewer is fine if the material doesn't support that many good candidates, but do not pad with weak choices just to hit the number. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"ubiquitous\", \"meaning\": \"어디에나 있는\"}]}.";
+        const userMsg = "Learning material:\n\n" + capText(sourceText, 12000);
+        const result = await callAI(sys, userMsg, true, GENERATION_MODEL, 3000);
+        const extracted = (result.words || []).filter(w => w.word && w.meaning);
+        if(!extracted.length){
+          showToast("Couldn't find suitable vocabulary in that material. Try a longer or richer passage.");
+          autoExtractVocabBtn.disabled = false;
+          autoExtractVocabBtn.textContent = "Extract vocabulary with AI";
+          return;
+        }
+        state.vocabPreview = extracted.map(w => ({ id: uid("wp"), word: w.word.trim(), meaning: w.meaning.trim() }));
+        showToast("Extracted " + extracted.length + " word(s) — review below before saving.");
+        render();
+      }catch(err){
+        showToast("Extraction failed: " + err.message);
+        autoExtractVocabBtn.disabled = false;
+        autoExtractVocabBtn.textContent = "Extract vocabulary with AI";
+      }
     };
 
     const vocabFile = document.getElementById("vocab-file");
