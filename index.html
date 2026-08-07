@@ -334,7 +334,7 @@ const db = getFirestore(fbApp);
   // Requests go through a small proxy (Deno Deploy) that holds the Groq key
   // server-side, so the key never ships in this public page's source.
   const AI_PROXY_URL = "https://edmgc.chris-edm.deno.net";
-  async function callAI(systemPrompt, userPrompt, expectJson, model, maxTokens){
+  async function callAI(systemPrompt, userPrompt, expectJson, model, maxTokens, temperature){
     const resp = await fetch(
       AI_PROXY_URL,
       {
@@ -345,6 +345,7 @@ const db = getFirestore(fbApp);
         body: JSON.stringify({
           model: model || GRADING_MODEL,
           max_completion_tokens: maxTokens || 2000,
+          ...(typeof temperature === "number" ? { temperature } : {}),
           messages: [
             ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
             { role: "user", content: userPrompt }
@@ -2076,7 +2077,7 @@ const db = getFirestore(fbApp);
         const sys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students studying in English. From the provided learning material, select vocabulary words worth testing. Selection criteria: (1) Include a broad mix of vocabulary a BTEC HND Level 5 or A-Level student should know: general vocabulary at intermediate level and above (e.g. 'meticulous', 'ubiquitous', 'inevitable', but also more moderate words like 'concerned', 'valuable', 'crucial' that are still worth reinforcing) and broadly ACADEMIC vocabulary — words that are common and useful ACROSS academic/business/professional writing generally, even if this particular passage happens to be about business, science, or any other field (e.g. 'stakeholder', 'implement', 'diversify', 'sustainable', 'leverage', 'mitigate', 'framework', 'governance' are all fine to include — these are broadly transferable academic/professional vocabulary, NOT narrow jargon, even though they appear in business contexts). (2) EXCLUDE only things that are genuinely narrow and specific: the proper name of a theory/model/law (e.g. 'Porter's Five Forces', 'Maslow's hierarchy'), a formula or equation, a brand/company/person's name, or a unit of measurement/symbol. Do NOT exclude a word just because it relates to the document's subject — only exclude it if it is a named theory/model itself or is meaningless outside this one specific context. (3) EXCLUDE only genuinely ELEMENTARY/beginner-level vocabulary — the kind of word a young child or absolute beginner already knows (e.g. 'girl', 'boy', 'happy', 'red', 'big', 'dog', 'good', 'because'). Do NOT exclude ordinary intermediate-level words just because they're common in everyday use (e.g. 'concerned', 'valuable', 'significant', 'affect', 'require', 'various' should all be INCLUDED, not treated as too basic) — the bar for exclusion is elementary/beginner level only, not intermediate. (4) Be GENEROUS, not conservative: your default should be to include a word unless it clearly fails one of the exclusion rules above — most content words above elementary level in a real lecture/reading passage should qualify. Aim to actually reach close to the requested count whenever the source material has enough content to support it (as a rough guide, a passage of a few hundred words should comfortably yield 20-30+ candidates now that only elementary-level words are excluded) — only return noticeably fewer than requested if the source text itself is short or extremely repetitive. For each word chosen, give the base/dictionary form (not a random inflected form from the text). MEANING RULES — both are mandatory: (a) Write every Korean meaning using ONLY pure Hangul (한글) — never mix in characters from ANY other writing system, including Hanja/Chinese characters (漢字), Japanese kana, Cyrillic, Arabic, Greek, or any other script, even for a single word or syllable, and even for Sino-Korean vocabulary that is traditionally sometimes written with Hanja. For example write 통합된 (not 統合된), 결합된 (not 結合된), 지속가능한 (not 持續可能한), 비정상적인 (not anything mixing in Cyrillic or other scripts). Every single character in the meaning field must be Hangul, a digit, or standard punctuation — no exceptions, and this applies to every single word in the list, not just some of them. (b) If the word genuinely has more than one common, distinct sense (different meanings depending on context — not just near-synonyms of the same sense), include each distinct sense as its own group of Korean synonyms, separated by ' / '. For example 'discipline' → '학문, 학과 / 규율, 훈육, 징계' (academic-subject sense, then behavior/control sense). Only split into multiple senses when the meaning genuinely changes with context; for words with just one sense, give a short comma-separated group of close synonyms as usual (e.g. 'subdivision' → '분할, 분리'), not multiple sense-groups. Select up to roughly " + count + " words. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"discipline\", \"meaning\": \"학문, 학과 / 규율, 훈육, 징계\"}]}.";
         const userMsg = "Learning material:\n\n" + capText(sourceText, 20000);
         const extractMaxTokens = Math.min(8000, 800 + count * 60);
-        const result = await callAI(sys, userMsg, true, GENERATION_MODEL, extractMaxTokens);
+        const result = await callAI(sys, userMsg, true, GENERATION_MODEL, extractMaxTokens, 0.6);
         let extracted = (result.words || []).filter(w => w.word && w.meaning);
         if(!extracted.length){
           showToast("Couldn't find suitable vocabulary in that material. Try a longer or richer passage.");
@@ -2098,7 +2099,7 @@ const db = getFirestore(fbApp);
           const topUpSys = sys + " IMPORTANT: this is a follow-up pass. The instructor already has these words selected from the same material — do NOT repeat any of them, only find genuinely NEW, DIFFERENT words that also meet the criteria above and were missed the first time: " + alreadyFound + ". Look harder through the material for any qualifying word not in that list, including ones that seemed borderline the first time, less prominent words, or words that only appear once or twice. If there truly are no more qualifying words left in the material, return an empty list rather than repeating or inventing weak ones.";
           const topUpUserMsg = "Learning material:\n\n" + capText(sourceText, 20000) + "\n\nFind up to " + stillNeeded + " more NEW words not already in this list: " + alreadyFound;
           try{
-            const topUpResult = await callAI(topUpSys, topUpUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60));
+            const topUpResult = await callAI(topUpSys, topUpUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60), 0.6);
             const topUpWords = (topUpResult.words || []).filter(w => w.word && w.meaning);
             const newOnes = topUpWords.filter(w => !extracted.some(e => e.word.trim().toLowerCase() === w.word.trim().toLowerCase()));
             if(!newOnes.length){ consecutiveEmptyRounds++; continue; }
@@ -2122,7 +2123,7 @@ const db = getFirestore(fbApp);
           const relaxedSys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students. The strict-criteria search on this material is exhausted, so this is a RELAXED fallback pass to fill the remaining quota — loosen the bar compared to a normal pass: (1) You may now include more common/lower-level words than before, as long as they're not trivial function words (articles, pronouns, basic conjunctions like 'the', 'is', 'and', 'a'). (2) You may now include words that are somewhat more specific to this document's subject, as long as they're not literally the proper name of a theory/model/formula/brand. (3) Do NOT repeat any of these already-selected words: " + alreadyFound + ". Still write meanings in pure Hangul only (한글), with the same multi-sense rule (separate distinct senses with ' / '). Find up to " + stillNeeded + " more words from the material below. If genuinely nothing more can be found even with these loosened rules, return an empty list. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"...\", \"meaning\": \"...\"}]}.";
           const relaxedUserMsg = "Learning material:\n\n" + capText(sourceText, 20000);
           try{
-            const relaxedResult = await callAI(relaxedSys, relaxedUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60));
+            const relaxedResult = await callAI(relaxedSys, relaxedUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60), 0.6);
             const relaxedWords = (relaxedResult.words || []).filter(w => w.word && w.meaning);
             const newOnes = relaxedWords.filter(w => !extracted.some(e => e.word.trim().toLowerCase() === w.word.trim().toLowerCase()));
             if(!newOnes.length){ relaxedConsecutiveEmpty++; continue; }
@@ -2133,23 +2134,29 @@ const db = getFirestore(fbApp);
           }
         }
         const relaxedAdded = extracted.length - strictCount;
-        // Verification pass: some meanings can still slip in Hanja/Kanji/Japanese
-        // characters despite the instructions above — catch and fix those here
-        // rather than relying on the prompt alone.
+        // Verification pass: some meanings can still slip in Hanja/Kanji/Japanese/
+        // Cyrillic characters despite the instructions above. Fix these in small
+        // batches (a single call trying to fix dozens at once was silently
+        // failing — its fixed token budget couldn't fit the response, the JSON
+        // came back truncated, and the whole batch got skipped with nothing fixed).
         let flagged = extracted.filter(w => hasNonHangulCJK(w.meaning));
-        for(let attempt = 0; attempt < 2 && flagged.length; attempt++){
-          autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Fixing ' + flagged.length + ' meaning(s)...';
-          try{
-            const fixSys = "The Korean meanings below were supposed to use ONLY pure Hangul (한글) but some accidentally contain characters from another script — this could be Hanja, Kanji, Japanese kana, Cyrillic, Arabic, Greek, or any other non-Korean script mixed in by mistake. Rewrite ONLY the 'meaning' for each word using pure Hangul (한글) only, with no characters from any other writing system at all — not even Sino-Korean words that are traditionally sometimes written with Hanja (e.g. write 통합 not 統合, 부흥기 not 復興期, 소멸 not 消滅, 비정상적인 not '비 обычный적인'). Keep the same word and the same number of distinct senses (separated by ' / ' if there was more than one). Respond ONLY with valid JSON, no preamble, no fences, in the same order given. Shape: {\"words\": [{\"word\": \"...\", \"meaning\": \"...\"}]}.";
-            const fixUserMsg = "Fix these:\n" + flagged.map(w => w.word + " — current (broken) meaning: " + w.meaning).join("\n");
-            const fixResult = await callAI(fixSys, fixUserMsg, true, GENERATION_MODEL, 1500);
-            const fixedList = fixResult.words || [];
-            fixedList.forEach(fw=>{
-              const target = extracted.find(w => w.word.trim().toLowerCase() === (fw.word||"").trim().toLowerCase());
-              if(target && fw.meaning) target.meaning = fw.meaning;
-            });
-          }catch(err){
-            break; // if the repair call itself fails, fall through to manual-review flagging below
+        for(let attempt = 0; attempt < 3 && flagged.length; attempt++){
+          const batches = [];
+          for(let i = 0; i < flagged.length; i += 15) batches.push(flagged.slice(i, i + 15));
+          for(const batch of batches){
+            autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Fixing ' + flagged.length + ' meaning(s)...';
+            try{
+              const fixSys = "The Korean meanings below were supposed to use ONLY pure Hangul (한글) but some accidentally contain characters from another script — this could be Hanja, Kanji, Japanese kana, Cyrillic, Arabic, Greek, or any other non-Korean script mixed in by mistake. Rewrite ONLY the 'meaning' for each word using pure Hangul (한글) only, with no characters from any other writing system at all — not even Sino-Korean words that are traditionally sometimes written with Hanja (e.g. write 통합 not 統合, 부흥기 not 復興期, 소멸 not 消滅, 근대성 not 近代性 or 現代性, 위기 not 危機). Keep the same word and the same number of distinct senses (separated by ' / ' if there was more than one). Respond ONLY with valid JSON, no preamble, no fences, in the same order given, one entry per word given. Shape: {\"words\": [{\"word\": \"...\", \"meaning\": \"...\"}]}.";
+              const fixUserMsg = "Fix these " + batch.length + " entries:\n" + batch.map(w => w.word + " — current (broken) meaning: " + w.meaning).join("\n");
+              const fixResult = await callAI(fixSys, fixUserMsg, true, GENERATION_MODEL, Math.min(4000, 500 + batch.length * 80), 0.4);
+              const fixedList = fixResult.words || [];
+              fixedList.forEach(fw=>{
+                const target = extracted.find(w => w.word.trim().toLowerCase() === (fw.word||"").trim().toLowerCase());
+                if(target && fw.meaning) target.meaning = fw.meaning;
+              });
+            }catch(err){
+              continue; // this batch's fix failed — move on, it'll still show as flagged for manual review
+            }
           }
           flagged = extracted.filter(w => hasNonHangulCJK(w.meaning));
         }
