@@ -943,23 +943,35 @@ const db = getFirestore(fbApp);
       </div>
       ${levelControls}
       <div class="q-list">
-        ${qs ? renderQuestionEditList(qs, unit) : `<p class="small-note">Not generated yet.</p>`}
+        ${qs ? renderQuestionEditList(qs, unit, session.id) : `<p class="small-note">Not generated yet.</p>`}
       </div>
     </div>`;
   }
 
-  function renderQuestionEditList(qs, unit){
+  function renderQuestionEditList(qs, unit, sessionId){
     if(!qs || !qs.length) return `<p class="small-note">No questions generated yet.</p>`;
     const isMarksStyle = unit.programme === "alevel";
-    return qs.map((q,i)=>`<div class="qedit">
-      <div class="q-number">Question ${i+1} — ${escapeHtml(q.loCode||'')}${isMarksStyle ? " (" + (q.level ? "Level " + q.level + ", " : "") + (q.maxMarks||'?') + " marks)" : (q.criteriaLabel ? " (" + escapeHtml(q.criteriaLabel) + ")" : "")}</div>
-      <div class="q-text">${escapeHtml(q.question)}</div>
-      ${isMarksStyle && q.markScheme ? `<details><summary class="small-note" style="cursor:pointer;">Mark scheme</summary>
-        <p style="font-size:12.5px;color:var(--ink-soft);white-space:pre-wrap;">${escapeHtml(q.markScheme)}</p>
-      </details>` : ""}
-      <details><summary class="small-note" style="cursor:pointer;">Model answer points (for grading reference)</summary>
-        <ul style="font-size:12.5px;color:var(--ink-soft);">${(q.modelAnswerPoints||[]).map(p=>`<li>${escapeHtml(p)}</li>`).join("")}</ul>
-      </details>
+    if(isMarksStyle){
+      return qs.map((q,i)=>`<div class="qedit">
+        <div class="q-number">Question ${i+1} — ${escapeHtml(q.loCode||'')} (${q.level ? "Level " + q.level + ", " : ""}${q.maxMarks||'?'} marks)</div>
+        <div class="q-text">${escapeHtml(q.question)}</div>
+        ${q.markScheme ? `<details><summary class="small-note" style="cursor:pointer;">Mark scheme</summary>
+          <p style="font-size:12.5px;color:var(--ink-soft);white-space:pre-wrap;">${escapeHtml(q.markScheme)}</p>
+        </details>` : ""}
+        <details><summary class="small-note" style="cursor:pointer;">Model answer points (for grading reference)</summary>
+          <ul style="font-size:12.5px;color:var(--ink-soft);">${(q.modelAnswerPoints||[]).map(p=>`<li>${escapeHtml(p)}</li>`).join("")}</ul>
+        </details>
+      </div>`).join("");
+    }
+    return qs.map((q,i)=>`<div class="qedit" data-question-id="${q.id}" data-session-id="${sessionId}">
+      <div class="q-number">Question ${i+1} — ${escapeHtml(q.loCode||'')}</div>
+      <label style="font-size:11px;">Question text</label>
+      <textarea class="hnd-q-edit-field" data-field="question" style="min-height:70px;">${escapeHtml(q.question)}</textarea>
+      <label style="font-size:11px;">Criteria addressed (e.g. P1, M1)</label>
+      <input type="text" class="hnd-q-edit-field" data-field="criteriaLabel" value="${escapeHtml(q.criteriaLabel||'')}">
+      <label style="font-size:11px;">Model answer points — one per line (for AI grading reference; not shown to students)</label>
+      <textarea class="hnd-q-edit-field" data-field="modelAnswerPoints" style="min-height:70px;">${escapeHtml((q.modelAnswerPoints||[]).join("\n"))}</textarea>
+      <button class="btn secondary save-hnd-question-btn" data-question-id="${q.id}" data-session-id="${sessionId}" style="margin-top:8px;">Save changes</button>
     </div>`).join("");
   }
 
@@ -1540,6 +1552,32 @@ const db = getFirestore(fbApp);
       };
     });
 
+    app.querySelectorAll(".save-hnd-question-btn").forEach(btn=>{
+      btn.onclick = async () => {
+        const qid = btn.dataset.questionId;
+        const sid = btn.dataset.sessionId;
+        const card = app.querySelector(`.qedit[data-question-id="${qid}"][data-session-id="${sid}"]`);
+        const questionText = card.querySelector('[data-field="question"]').value.trim();
+        const criteriaLabel = card.querySelector('[data-field="criteriaLabel"]').value.trim();
+        const modelAnswerText = card.querySelector('[data-field="modelAnswerPoints"]').value;
+        const modelAnswerPoints = modelAnswerText.split("\n").map(s=>s.trim()).filter(Boolean);
+        if(!questionText){ showToast("Question text can't be empty."); return; }
+        const qs = state._questionsCache[sid];
+        const q = qs && qs.find(x=>x.id===qid);
+        if(!q){ showToast("Couldn't find that question — try refreshing."); return; }
+        q.question = questionText;
+        q.criteriaLabel = criteriaLabel;
+        q.modelAnswerPoints = modelAnswerPoints;
+        try{
+          await saveQuestions(state.currentUnit.id, sid, qs);
+          showToast("Question updated.");
+          render();
+        }catch(err){
+          showToast("Could not save changes: " + err.message);
+        }
+      };
+    });
+
     app.querySelectorAll(".level-count-input").forEach(inp=>{
       inp.oninput = () => {
         const sid = inp.dataset.sessionId;
@@ -2024,7 +2062,7 @@ const db = getFirestore(fbApp);
       autoExtractVocabBtn.disabled = true;
       autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Extracting...';
       try{
-        const sys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students studying in English. From the provided learning material, select vocabulary words worth testing. Selection criteria: (1) Include a mix of general vocabulary (everyday but non-basic words a strong intermediate English learner should know, e.g. 'meticulous', 'ubiquitous', 'inevitable') and broadly ACADEMIC vocabulary — words that are common and useful ACROSS academic/business/professional writing generally, even if this particular passage happens to be about business, science, or any other field (e.g. 'stakeholder', 'implement', 'diversify', 'sustainable', 'leverage', 'mitigate', 'framework', 'governance' are all fine to include — these are broadly transferable academic/professional vocabulary, NOT narrow jargon, even though they appear in business contexts). (2) EXCLUDE only things that are genuinely narrow and specific: the proper name of a theory/model/law (e.g. 'Porter's Five Forces', 'Maslow's hierarchy'), a formula or equation, a brand/company/person's name, or a unit of measurement/symbol. Do NOT exclude a word just because it relates to the document's subject — only exclude it if it is a named theory/model itself or is meaningless outside this one specific context. (3) EXCLUDE words so basic that a strong intermediate English learner would already know them (e.g. 'good', 'because', 'company', 'important'). (4) Be GENEROUS, not conservative: your default should be to include a word unless it clearly fails one of the exclusion rules above — most non-basic content words in a real lecture/reading passage should qualify as either general or academic vocabulary. Aim to actually reach close to the requested count whenever the source material has enough content to support it (as a rough guide, a passage of a few hundred words should comfortably yield 15-20+ candidates) — only return noticeably fewer than requested if the source text itself is short or extremely repetitive. For each word chosen, give the base/dictionary form (not a random inflected form from the text) and an accurate, natural Korean meaning as it would actually be used, matching the sense the word has in this context. Select up to roughly " + count + " words. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"ubiquitous\", \"meaning\": \"어디에나 있는\"}]}.";
+        const sys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students studying in English. From the provided learning material, select vocabulary words worth testing. Selection criteria: (1) Include a mix of general vocabulary (everyday but non-basic words a strong intermediate English learner should know, e.g. 'meticulous', 'ubiquitous', 'inevitable') and broadly ACADEMIC vocabulary — words that are common and useful ACROSS academic/business/professional writing generally, even if this particular passage happens to be about business, science, or any other field (e.g. 'stakeholder', 'implement', 'diversify', 'sustainable', 'leverage', 'mitigate', 'framework', 'governance' are all fine to include — these are broadly transferable academic/professional vocabulary, NOT narrow jargon, even though they appear in business contexts). (2) EXCLUDE only things that are genuinely narrow and specific: the proper name of a theory/model/law (e.g. 'Porter's Five Forces', 'Maslow's hierarchy'), a formula or equation, a brand/company/person's name, or a unit of measurement/symbol. Do NOT exclude a word just because it relates to the document's subject — only exclude it if it is a named theory/model itself or is meaningless outside this one specific context. (3) EXCLUDE words so basic that a strong intermediate English learner would already know them (e.g. 'good', 'because', 'company', 'important'). (4) Be GENEROUS, not conservative: your default should be to include a word unless it clearly fails one of the exclusion rules above — most non-basic content words in a real lecture/reading passage should qualify as either general or academic vocabulary. Aim to actually reach close to the requested count whenever the source material has enough content to support it (as a rough guide, a passage of a few hundred words should comfortably yield 15-20+ candidates) — only return noticeably fewer than requested if the source text itself is short or extremely repetitive. For each word chosen, give the base/dictionary form (not a random inflected form from the text). MEANING RULES — both are mandatory: (a) Write every Korean meaning using ONLY pure Hangul (한글) — never use Hanja/Chinese characters (漢字) for any word, even Sino-Korean vocabulary that is traditionally sometimes written with Hanja. For example write 통합된 (not 統合된), 결합된 (not 結合된), 지속가능한 (not 持續可能한). Every single character in the meaning field must be Hangul or standard punctuation — no exceptions. (b) If the word genuinely has more than one common, distinct sense (different meanings depending on context — not just near-synonyms of the same sense), include each distinct sense as its own group of Korean synonyms, separated by ' / '. For example 'discipline' → '학문, 학과 / 규율, 훈육, 징계' (academic-subject sense, then behavior/control sense). Only split into multiple senses when the meaning genuinely changes with context; for words with just one sense, give a short comma-separated group of close synonyms as usual (e.g. 'subdivision' → '분할, 분리'), not multiple sense-groups. Select up to roughly " + count + " words. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"discipline\", \"meaning\": \"학문, 학과 / 규율, 훈육, 징계\"}]}.";
         const userMsg = "Learning material:\n\n" + capText(sourceText, 12000);
         const result = await callAI(sys, userMsg, true, GENERATION_MODEL, 3000);
         const extracted = (result.words || []).filter(w => w.word && w.meaning);
