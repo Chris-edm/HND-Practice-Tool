@@ -2087,24 +2087,52 @@ const db = getFirestore(fbApp);
         // Top-up passes: a single call tends to under-deliver on large requested
         // counts even when told to be generous, since the model settles for a
         // list that "feels" complete. Ask again specifically for MORE, different
-        // words from the same material until we reach the target or the source
-        // genuinely runs dry.
-        for(let round = 0; round < 3 && extracted.length < count * 0.9; round++){
+        // words from the same material until we reach the target or two rounds
+        // in a row come back empty (a single empty round can just be an unlucky
+        // sample, not genuine exhaustion).
+        let consecutiveEmptyRounds = 0;
+        for(let round = 0; round < 6 && extracted.length < count && consecutiveEmptyRounds < 2; round++){
           autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Found ' + extracted.length + ' — looking for more...';
           const stillNeeded = count - extracted.length;
           const alreadyFound = extracted.map(w=>w.word).join(", ");
-          const topUpSys = sys + " IMPORTANT: this is a follow-up pass. The instructor already has these words selected from the same material — do NOT repeat any of them, only find genuinely NEW, DIFFERENT words that also meet the criteria above and were missed the first time: " + alreadyFound + ". Look harder through the material for any qualifying word not in that list, including ones that seemed borderline the first time. If there truly are no more qualifying words left in the material, return an empty list rather than repeating or inventing weak ones.";
+          const topUpSys = sys + " IMPORTANT: this is a follow-up pass. The instructor already has these words selected from the same material — do NOT repeat any of them, only find genuinely NEW, DIFFERENT words that also meet the criteria above and were missed the first time: " + alreadyFound + ". Look harder through the material for any qualifying word not in that list, including ones that seemed borderline the first time, less prominent words, or words that only appear once or twice. If there truly are no more qualifying words left in the material, return an empty list rather than repeating or inventing weak ones.";
           const topUpUserMsg = "Learning material:\n\n" + capText(sourceText, 20000) + "\n\nFind up to " + stillNeeded + " more NEW words not already in this list: " + alreadyFound;
           try{
             const topUpResult = await callAI(topUpSys, topUpUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60));
             const topUpWords = (topUpResult.words || []).filter(w => w.word && w.meaning);
             const newOnes = topUpWords.filter(w => !extracted.some(e => e.word.trim().toLowerCase() === w.word.trim().toLowerCase()));
-            if(!newOnes.length) break; // material is exhausted, stop asking
+            if(!newOnes.length){ consecutiveEmptyRounds++; continue; }
+            consecutiveEmptyRounds = 0;
             extracted = extracted.concat(newOnes);
           }catch(err){
             break; // if a top-up round fails, keep what we already have
           }
         }
+        // Relaxed fallback: if strict-criteria rounds above still fall short,
+        // the material likely doesn't have enough words meeting the full bar.
+        // Rather than silently under-delivering, run a couple more rounds with
+        // loosened criteria (allowing more basic and more subject-adjacent
+        // words) specifically to close the remaining gap, and say so plainly.
+        const strictCount = extracted.length;
+        let relaxedConsecutiveEmpty = 0;
+        for(let round = 0; round < 3 && extracted.length < count && relaxedConsecutiveEmpty < 2; round++){
+          autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Found ' + extracted.length + ' — loosening criteria for more...';
+          const stillNeeded = count - extracted.length;
+          const alreadyFound = extracted.map(w=>w.word).join(", ");
+          const relaxedSys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students. The strict-criteria search on this material is exhausted, so this is a RELAXED fallback pass to fill the remaining quota — loosen the bar compared to a normal pass: (1) You may now include more common/lower-level words than before, as long as they're not trivial function words (articles, pronouns, basic conjunctions like 'the', 'is', 'and', 'a'). (2) You may now include words that are somewhat more specific to this document's subject, as long as they're not literally the proper name of a theory/model/formula/brand. (3) Do NOT repeat any of these already-selected words: " + alreadyFound + ". Still write meanings in pure Hangul only (한글), with the same multi-sense rule (separate distinct senses with ' / '). Find up to " + stillNeeded + " more words from the material below. If genuinely nothing more can be found even with these loosened rules, return an empty list. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"...\", \"meaning\": \"...\"}]}.";
+          const relaxedUserMsg = "Learning material:\n\n" + capText(sourceText, 20000);
+          try{
+            const relaxedResult = await callAI(relaxedSys, relaxedUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60));
+            const relaxedWords = (relaxedResult.words || []).filter(w => w.word && w.meaning);
+            const newOnes = relaxedWords.filter(w => !extracted.some(e => e.word.trim().toLowerCase() === w.word.trim().toLowerCase()));
+            if(!newOnes.length){ relaxedConsecutiveEmpty++; continue; }
+            relaxedConsecutiveEmpty = 0;
+            extracted = extracted.concat(newOnes);
+          }catch(err){
+            break;
+          }
+        }
+        const relaxedAdded = extracted.length - strictCount;
         // Verification pass: some meanings can still slip in Hanja/Kanji/Japanese
         // characters despite the instructions above — catch and fix those here
         // rather than relying on the prompt alone.
@@ -2126,7 +2154,9 @@ const db = getFirestore(fbApp);
           flagged = extracted.filter(w => hasNonHangulCJK(w.meaning));
         }
         state.vocabPreview = extracted.map(w => ({ id: uid("wp"), word: w.word.trim(), meaning: w.meaning.trim() }));
-        showToast("Extracted " + extracted.length + " word(s)" + (flagged.length ? " — " + flagged.length + " highlighted in red still need a manual fix" : "") + " — review below before saving.");
+        const shortfallNote = extracted.length < count ? (" (you asked for " + count + " — even with loosened criteria, this material appears to only contain about " + extracted.length + " usable words)") : "";
+        const relaxedNote = relaxedAdded > 0 ? (" — " + relaxedAdded + " of these came from a loosened pass after strict criteria ran out, so double-check those a little more carefully") : "";
+        showToast("Extracted " + extracted.length + " word(s)" + shortfallNote + relaxedNote + (flagged.length ? " — " + flagged.length + " highlighted in red still need a manual fix" : "") + " — review below before saving.");
         render();
       }catch(err){
         showToast("Extraction failed: " + err.message);
