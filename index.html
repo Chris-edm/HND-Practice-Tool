@@ -2084,6 +2084,27 @@ const db = getFirestore(fbApp);
           autoExtractVocabBtn.textContent = "Extract vocabulary with AI";
           return;
         }
+        // Top-up passes: a single call tends to under-deliver on large requested
+        // counts even when told to be generous, since the model settles for a
+        // list that "feels" complete. Ask again specifically for MORE, different
+        // words from the same material until we reach the target or the source
+        // genuinely runs dry.
+        for(let round = 0; round < 3 && extracted.length < count * 0.9; round++){
+          autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Found ' + extracted.length + ' — looking for more...';
+          const stillNeeded = count - extracted.length;
+          const alreadyFound = extracted.map(w=>w.word).join(", ");
+          const topUpSys = sys + " IMPORTANT: this is a follow-up pass. The instructor already has these words selected from the same material — do NOT repeat any of them, only find genuinely NEW, DIFFERENT words that also meet the criteria above and were missed the first time: " + alreadyFound + ". Look harder through the material for any qualifying word not in that list, including ones that seemed borderline the first time. If there truly are no more qualifying words left in the material, return an empty list rather than repeating or inventing weak ones.";
+          const topUpUserMsg = "Learning material:\n\n" + capText(sourceText, 20000) + "\n\nFind up to " + stillNeeded + " more NEW words not already in this list: " + alreadyFound;
+          try{
+            const topUpResult = await callAI(topUpSys, topUpUserMsg, true, GENERATION_MODEL, Math.min(8000, 800 + stillNeeded * 60));
+            const topUpWords = (topUpResult.words || []).filter(w => w.word && w.meaning);
+            const newOnes = topUpWords.filter(w => !extracted.some(e => e.word.trim().toLowerCase() === w.word.trim().toLowerCase()));
+            if(!newOnes.length) break; // material is exhausted, stop asking
+            extracted = extracted.concat(newOnes);
+          }catch(err){
+            break; // if a top-up round fails, keep what we already have
+          }
+        }
         // Verification pass: some meanings can still slip in Hanja/Kanji/Japanese
         // characters despite the instructions above — catch and fix those here
         // rather than relying on the prompt alone.
