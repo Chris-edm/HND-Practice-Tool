@@ -299,6 +299,12 @@ const db = getFirestore(fbApp);
   // Finds the first {...} or [...] block and returns just that, ignoring any
   // text the model adds before or after it (a common cause of JSON.parse
   // failures like "Unexpected non-whitespace character after JSON").
+  // Detects Hanja/Kanji (CJK ideographs) or Japanese kana in a string — used to
+  // catch cases where the AI slips non-Hangul characters into a Korean meaning.
+  function hasNonHangulCJK(text){
+    return /[\u4E00-\u9FFF\u3040-\u30FF\u3400-\u4DBF]/.test(text || "");
+  }
+
   function extractBalancedJson(text){
     const start = text.search(/[\[{]/);
     if(start === -1) return text;
@@ -1975,14 +1981,18 @@ const db = getFirestore(fbApp);
 
   function vocabPreviewHtml(){
     const preview = state.vocabPreview;
+    const flaggedCount = preview.filter(p=>hasNonHangulCJK(p.meaning)).length;
     return `<div style="margin-top:16px;border-top:2px solid var(--ink);padding-top:14px;">
-      <p class="hint">Found ${preview.length} entries. Check them over — fix or delete any that look wrong — then confirm.</p>
+      <p class="hint">Found ${preview.length} entries. Check them over — fix or delete any that look wrong — then confirm.${flaggedCount ? ` <strong style="color:#b3261e;">${flaggedCount} meaning(s) below are highlighted in red — they still contain non-Hangul characters and need a manual fix.</strong>` : ""}</p>
       <div id="vocab-preview-rows">
-        ${preview.map(p=>`<div class="row" data-preview-id="${p.id}" style="align-items:center;gap:8px;margin-bottom:6px;">
+        ${preview.map(p=>{
+          const flagged = hasNonHangulCJK(p.meaning);
+          return `<div class="row" data-preview-id="${p.id}" style="align-items:center;gap:8px;margin-bottom:6px;">
           <input type="text" class="preview-word-field" data-preview-id="${p.id}" value="${escapeHtml(p.word)}" style="flex:1;">
-          <input type="text" class="preview-meaning-field" data-preview-id="${p.id}" value="${escapeHtml(p.meaning)}" style="flex:1.4;">
+          <input type="text" class="preview-meaning-field" data-preview-id="${p.id}" value="${escapeHtml(p.meaning)}" style="flex:1.4;${flagged ? "border-color:#b3261e;background:#fdecea;" : ""}">
           <button type="button" class="btn danger delete-preview-btn" data-preview-id="${p.id}" style="margin:0;padding:8px 12px;">✕</button>
-        </div>`).join("")}
+        </div>`;
+        }).join("")}
       </div>
       <button class="btn" id="confirm-preview-btn">Confirm &amp; add ${preview.length} word(s)</button>
       <button class="btn secondary" id="cancel-preview-btn">Cancel</button>
@@ -2065,15 +2075,35 @@ const db = getFirestore(fbApp);
         const sys = "You are helping a Korean instructor build English vocabulary tests for BTEC HND Level 5 and A-Level students studying in English. From the provided learning material, select vocabulary words worth testing. Selection criteria: (1) Include a mix of general vocabulary (everyday but non-basic words a strong intermediate English learner should know, e.g. 'meticulous', 'ubiquitous', 'inevitable') and broadly ACADEMIC vocabulary — words that are common and useful ACROSS academic/business/professional writing generally, even if this particular passage happens to be about business, science, or any other field (e.g. 'stakeholder', 'implement', 'diversify', 'sustainable', 'leverage', 'mitigate', 'framework', 'governance' are all fine to include — these are broadly transferable academic/professional vocabulary, NOT narrow jargon, even though they appear in business contexts). (2) EXCLUDE only things that are genuinely narrow and specific: the proper name of a theory/model/law (e.g. 'Porter's Five Forces', 'Maslow's hierarchy'), a formula or equation, a brand/company/person's name, or a unit of measurement/symbol. Do NOT exclude a word just because it relates to the document's subject — only exclude it if it is a named theory/model itself or is meaningless outside this one specific context. (3) EXCLUDE words so basic that a strong intermediate English learner would already know them (e.g. 'good', 'because', 'company', 'important'). (4) Be GENEROUS, not conservative: your default should be to include a word unless it clearly fails one of the exclusion rules above — most non-basic content words in a real lecture/reading passage should qualify as either general or academic vocabulary. Aim to actually reach close to the requested count whenever the source material has enough content to support it (as a rough guide, a passage of a few hundred words should comfortably yield 15-20+ candidates) — only return noticeably fewer than requested if the source text itself is short or extremely repetitive. For each word chosen, give the base/dictionary form (not a random inflected form from the text). MEANING RULES — both are mandatory: (a) Write every Korean meaning using ONLY pure Hangul (한글) — never use Hanja/Chinese characters (漢字) for any word, even Sino-Korean vocabulary that is traditionally sometimes written with Hanja. For example write 통합된 (not 統合된), 결합된 (not 結合된), 지속가능한 (not 持續可能한). Every single character in the meaning field must be Hangul or standard punctuation — no exceptions. (b) If the word genuinely has more than one common, distinct sense (different meanings depending on context — not just near-synonyms of the same sense), include each distinct sense as its own group of Korean synonyms, separated by ' / '. For example 'discipline' → '학문, 학과 / 규율, 훈육, 징계' (academic-subject sense, then behavior/control sense). Only split into multiple senses when the meaning genuinely changes with context; for words with just one sense, give a short comma-separated group of close synonyms as usual (e.g. 'subdivision' → '분할, 분리'), not multiple sense-groups. Select up to roughly " + count + " words. Respond ONLY with valid JSON, no preamble, no fences. Shape: {\"words\": [{\"word\": \"discipline\", \"meaning\": \"학문, 학과 / 규율, 훈육, 징계\"}]}.";
         const userMsg = "Learning material:\n\n" + capText(sourceText, 12000);
         const result = await callAI(sys, userMsg, true, GENERATION_MODEL, 3000);
-        const extracted = (result.words || []).filter(w => w.word && w.meaning);
+        let extracted = (result.words || []).filter(w => w.word && w.meaning);
         if(!extracted.length){
           showToast("Couldn't find suitable vocabulary in that material. Try a longer or richer passage.");
           autoExtractVocabBtn.disabled = false;
           autoExtractVocabBtn.textContent = "Extract vocabulary with AI";
           return;
         }
+        // Verification pass: some meanings can still slip in Hanja/Kanji/Japanese
+        // characters despite the instructions above — catch and fix those here
+        // rather than relying on the prompt alone.
+        let flagged = extracted.filter(w => hasNonHangulCJK(w.meaning));
+        for(let attempt = 0; attempt < 2 && flagged.length; attempt++){
+          autoExtractVocabBtn.innerHTML = '<span class="spinner"></span>Fixing ' + flagged.length + ' meaning(s)...';
+          try{
+            const fixSys = "The Korean meanings below were supposed to use ONLY pure Hangul (한글) but some contain Hanja, Kanji, or Japanese characters by mistake. Rewrite ONLY the 'meaning' for each word using pure Hangul (한글) only — no Chinese/Japanese characters at all, not even Sino-Korean words that are traditionally written with Hanja (e.g. write 통합 not 統合, 부흥기 not 復興期, 소멸 not 消滅). Keep the same word and the same number of distinct senses (separated by ' / ' if there was more than one). Respond ONLY with valid JSON, no preamble, no fences, in the same order given. Shape: {\"words\": [{\"word\": \"...\", \"meaning\": \"...\"}]}.";
+            const fixUserMsg = "Fix these:\n" + flagged.map(w => w.word + " — current (broken) meaning: " + w.meaning).join("\n");
+            const fixResult = await callAI(fixSys, fixUserMsg, true, GENERATION_MODEL, 1500);
+            const fixedList = fixResult.words || [];
+            fixedList.forEach(fw=>{
+              const target = extracted.find(w => w.word.trim().toLowerCase() === (fw.word||"").trim().toLowerCase());
+              if(target && fw.meaning) target.meaning = fw.meaning;
+            });
+          }catch(err){
+            break; // if the repair call itself fails, fall through to manual-review flagging below
+          }
+          flagged = extracted.filter(w => hasNonHangulCJK(w.meaning));
+        }
         state.vocabPreview = extracted.map(w => ({ id: uid("wp"), word: w.word.trim(), meaning: w.meaning.trim() }));
-        showToast("Extracted " + extracted.length + " word(s) — review below before saving.");
+        showToast("Extracted " + extracted.length + " word(s)" + (flagged.length ? " — " + flagged.length + " highlighted in red still need a manual fix" : "") + " — review below before saving.");
         render();
       }catch(err){
         showToast("Extraction failed: " + err.message);
